@@ -1,0 +1,33 @@
+[project]
+name = "guh"
+version = "0.1.0"
+description = "Experimental USB2 HS/FS host primitives for FPGAs."
+authors = [
+    {name = "Sebastian Holzapfel", email = "me@sebholzapfel.com"},
+]
+dependencies = [
+    "amaranth[builtin-yosys]==0.5.4",
+    "amaranth-boards @ git+https://github.com/amaranth-lang/amaranth-boards@main",
+    "amaranth-soc @ git+https://github.com/amaranth-lang/amaranth-soc@main",
+    "amaranth-stdio @ git+https://github.com/amaranth-lang/amaranth-stdio@main",
+    "luna-usb @ git+https://github.com/greatscottgadgets/luna@main",
+    "cynthion @ git+https://github.com/greatscottgadgets/cynthion@main#subdirectory=cynthion/python",
+    "parameterized>=0.9.0",
+    "yowasp-yosys==0.52.0.0.post894",
+    "yowasp-nextpnr-ecp5",
+    "apollo-fpga>=1.1.1",
+    "pytest-xdist>=3.8.0",
+    "colorama>=0.4.6",
+]
+requires-python = "==3.13.*"
+readme = "README.md"
+license = {text = "BSD"}
+
+
+[tool.pdm.dev-dependencies]
+test = [
+    "pytest",
+]
+
+[tool.pdm.scripts]
+test = { cmd = "pytest -n auto tests/" }
