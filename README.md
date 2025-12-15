@@ -16,7 +16,7 @@ As of now, this library is predominantly built to serve the needs of [Tiliqua](h
 
 As of now, `guh` can enumerate USB2 high-speed (480Mbit) and full-speed (12Mbit) devices in pure gateware. A simple state machine can parse incoming descriptors to determine what kind of device is attached, and which endpoints to use. Then, a custom 'plug-in' state machine for the desired device class can directly perform transfers on the device endpoints. I have tested this on USB thumbdrives at 480Mbit HS, and MIDI/HID devices at 12Mbit FS. More device classes will obviously require more work.
 
-The enumeration speed is dynamic: the same gateware can support both HS and LS devices. As of now, USB hubs can be enumerated *but not the devices behind them*. In the future, I hope to remove this limitation.
+The enumeration speed is dynamic: the same gateware can support both HS and FS devices. As of now, USB hubs can be enumerated *but not the devices behind them*. In the future, I hope to remove this limitation.
 
 As a highly experimental library, proper handling of all error conditions is incomplete, although enough is implemented to enumerate most devices I have tested without stalling. For this reason, it is common for host engines to include a watchdog which resets the enumeration state machine if nothing happens for too long, as a fallback to ensure we reattach to a device if something hangs.
 
