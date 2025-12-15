@@ -1,4 +1,4 @@
-# `guh` - Gateware USB Host
+# `guh` - Gateware USB Host [![CI](https://github.com/apfaudio/guh/actions/workflows/ci.yml/badge.svg)](https://github.com/apfaudio/guh/actions/workflows/ci.yml)
 
 `guh` is an experimental gateware library (written in [Amaranth HDL](https://amaranth-lang.org/docs/amaranth/v0.5.8/intro.html)), for building **custom USB2 high-speed and full-speed host engines<sup>*</sup>** for FPGAs. It builds heavily on [LUNA](https://github.com/greatscottgadgets/luna), which, whilst being extremely useful for implementing USB devices, does not implement USB Host. Eventually (perhaps after a lot of cleanup!) `guh` hopes to become part of LUNA in some form.
 
