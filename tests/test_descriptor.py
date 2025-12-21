@@ -11,7 +11,7 @@ from amaranth import *
 from amaranth.sim import *
 from parameterized import parameterized
 
-from conftest import put
+from guh.util import test_util
 from guh.usbh.descriptor import *
 
 # Some aliases for common device classes
@@ -75,7 +75,7 @@ class DescriptorTests(unittest.TestCase):
             ctx.set(dut.enable, 1)
             with open(f'tests/data/usbdesc_config/{name}.bin', 'rb') as f:
                 for byte in f.read():
-                    await put(ctx, dut.i, byte)
+                    await test_util.put(ctx, dut.i, byte)
             ctx.tick()
             self.assertEqual(ctx.get(dut.o.valid), 1)
             if expected_endp_in is not None:

@@ -15,12 +15,7 @@ from guh.usbh.types import USBHostSpeed
 from guh.engines.midi import USBMIDIHost
 from guh.engines.msc import USBMSCHost
 from guh.util.test_devices import FakeUSBMIDIDevice, FakeUSBMSCDevice
-
-from conftest import (
-    connect_utmi,
-    make_packet_capture_process,
-    patch_usb_timing_for_simulation,
-)
+from guh.util import test_util
 
 class IntegrationTests(unittest.TestCase):
 
@@ -38,14 +33,14 @@ class IntegrationTests(unittest.TestCase):
 
         m = Module()
 
-        patch_usb_timing_for_simulation()
+        test_util.patch_usb_timing_for_simulation()
 
         host = USBMIDIHost(device_address=0x12)
         m.submodules.hst = hst = DomainRenamer({"usb": "sync"})(host)
         m.submodules.dev = dev = DomainRenamer({"usb": "sync"})(
             FakeUSBMIDIDevice(full_speed_only=full_speed_only, max_packet_size=max_packet_size))
 
-        bus_event = connect_utmi(m, hst.sie.utmi, dev.utmi)
+        bus_event = test_util.connect_utmi(m, hst.sie.utmi, dev.utmi)
 
         expected_speed = USBHostSpeed.FULL if full_speed_only else USBHostSpeed.HIGH
         midi_bytes_received = []
@@ -64,7 +59,7 @@ class IntegrationTests(unittest.TestCase):
         sim = Simulator(m)
         sim.add_clock(1/60e6)
         sim.add_testbench(testbench)
-        sim.add_process(make_packet_capture_process(
+        sim.add_process(test_util.make_packet_capture_process(
             hst.sie.utmi, dev.utmi, bus_event, f"test_usb_midi_host_integration_{name}.pcap"))
         with sim.write_vcd(vcd_file=open(f"test_usb_midi_host_integration_{name}.vcd", "w")):
             sim.run()
@@ -78,14 +73,14 @@ class IntegrationTests(unittest.TestCase):
 
         m = Module()
 
-        patch_usb_timing_for_simulation()
+        test_util.patch_usb_timing_for_simulation()
 
         host = USBMSCHost(device_address=0x12)
         m.submodules.hst = hst = DomainRenamer({"usb": "sync"})(host)
         m.submodules.dev = dev = DomainRenamer({"usb": "sync"})(
             FakeUSBMSCDevice(full_speed_only=False, max_packet_size=64))
 
-        bus_event = connect_utmi(m, hst.sie.utmi, dev.utmi)
+        bus_event = test_util.connect_utmi(m, hst.sie.utmi, dev.utmi)
 
         block_data_received = []
 
@@ -139,7 +134,7 @@ class IntegrationTests(unittest.TestCase):
         sim = Simulator(m)
         sim.add_clock(1/60e6)
         sim.add_testbench(testbench)
-        sim.add_process(make_packet_capture_process(
+        sim.add_process(test_util.make_packet_capture_process(
             hst.sie.utmi, dev.utmi, bus_event, "test_usb_msc_host_integration.pcap"))
         with sim.write_vcd(vcd_file=open("test_usb_msc_host_integration.vcd", "w")):
             sim.run()
