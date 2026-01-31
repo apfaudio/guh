@@ -5,7 +5,7 @@
 groups = ["default"]
 strategy = ["inherit_metadata"]
 lock_version = "4.5.0"
-content_hash = "sha256:856d90a83db126d188f36674805609917146b8c5e8e79ef5bea80357f8fa02ab"
+content_hash = "sha256:70a37badb1625abf4b93d2087de9f2419551e46faf58974d5f1756dbe03aa32f"
 
 [[metadata.targets]]
 requires_python = "==3.13.*"
@@ -16,6 +16,7 @@ version = "0.5.4"
 requires_python = "~=3.8"
 summary = "Amaranth hardware definition language"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 dependencies = [
     "Jinja2~=3.0",
     "importlib-resources; python_version < \"3.9\"",
@@ -36,6 +37,7 @@ ref = "main"
 revision = "7e24efe2f6e95afddd0c1b56f1a9423c48caa472"
 summary = "Board and connector definitions for Amaranth HDL"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 dependencies = [
     "amaranth<0.7,>=0.5",
 ]
@@ -49,6 +51,7 @@ ref = "main"
 revision = "5c43cf58f15d9cd9c69ff83c97997708d386b2dc"
 summary = "System on Chip toolkit for Amaranth HDL"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 dependencies = [
     "amaranth<0.6,>=0.5",
 ]
@@ -62,6 +65,7 @@ ref = "main"
 revision = "618a13fb7108f69197d698df4d64c203553deaae"
 summary = "Industry standard I/O for Amaranth HDL"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 dependencies = [
     "amaranth<0.6,>=0.5",
 ]
@@ -72,6 +76,7 @@ version = "0.50.0.0.post118"
 requires_python = "~=3.8"
 summary = "Specialized WebAssembly build of Yosys used by Amaranth HDL"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 dependencies = [
     "importlib-resources>=1.4; python_version < \"3.9\"",
     "wasmtime<40,>=1",
@@ -87,6 +92,7 @@ extras = ["builtin-yosys"]
 requires_python = "~=3.8"
 summary = "Amaranth hardware definition language"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 dependencies = [
     "amaranth-yosys>=0.40",
     "amaranth==0.5.4",
@@ -102,6 +108,7 @@ version = "1.1.1"
 requires_python = ">=3.8"
 summary = "Python library and host tools for Apollo FPGA debug controllers."
 groups = ["default"]
+marker = "python_version == \"3.13\""
 dependencies = [
     "deprecation>=2.1.0",
     "importlib-resources; python_version < \"3.9\"",
@@ -121,6 +128,7 @@ version = "2.0.0"
 requires_python = ">=3.8"
 summary = "Backport of functools.lru_cache"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 files = [
     {file = "backports.functools_lru_cache-2.0.0-py2.py3-none-any.whl", hash = "sha256:0a754323a46847735a112677fb8807b45f6d824d02a5795a50905218ac56a0d6"},
     {file = "backports.functools_lru_cache-2.0.0.tar.gz", hash = "sha256:dcbfa5e0dae8a014168807c9e026d33eead71df5af76c1fb78fd248bf07f6f99"},
@@ -132,6 +140,7 @@ version = "8.3.1"
 requires_python = ">=3.10"
 summary = "Composable command line interface toolkit"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 dependencies = [
     "colorama; platform_system == \"Windows\"",
 ]
@@ -146,6 +155,7 @@ version = "0.4.6"
 requires_python = "!=3.0.*,!=3.1.*,!=3.2.*,!=3.3.*,!=3.4.*,!=3.5.*,!=3.6.*,>=2.7"
 summary = "Cross-platform colored terminal text."
 groups = ["default"]
+marker = "python_version == \"3.13\""
 files = [
     {file = "colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6"},
     {file = "colorama-0.4.6.tar.gz", hash = "sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44"},
@@ -157,6 +167,7 @@ version = "2.10.70"
 requires_python = ">=3.6"
 summary = "A powerful declarative symmetric parser/builder for binary data"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 files = [
     {file = "construct-2.10.70-py3-none-any.whl", hash = "sha256:c80be81ef595a1a821ec69dc16099550ed22197615f4320b57cc9ce2a672cb30"},
     {file = "construct-2.10.70.tar.gz", hash = "sha256:4d2472f9684731e58cc9c56c463be63baa1447d674e0d66aeb5627b22f512c29"},
@@ -172,6 +183,7 @@ ref = "main"
 revision = "65a7fd679ca19f51fd39f51ee40232bb817c5063"
 summary = "Python package and utilities for the Great Scott Gadgets Cynthion USB Test Instrument"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 dependencies = [
     "amaranth~=0.5",
     "apollo-fpga~=1.1",
@@ -195,6 +207,7 @@ name = "deprecation"
 version = "2.1.0"
 summary = "A library to handle automated deprecations"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 dependencies = [
     "packaging",
 ]
@@ -209,6 +222,7 @@ version = "2.1.2"
 requires_python = ">=3.8"
 summary = "execnet: rapid multi-Python deployment"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 files = [
     {file = "execnet-2.1.2-py3-none-any.whl", hash = "sha256:67fba928dd5a544b783f6056f449e5e3931a5c378b128bc18501f7ea79e296ec"},
     {file = "execnet-2.1.2.tar.gz", hash = "sha256:63d83bfdd9a23e35b9c6a3261412324f964c2ec8dcd8d3c6916ee9373e0befcd"},
@@ -220,6 +234,7 @@ version = "1.0.0"
 requires_python = ">=2.6, !=3.0.*, !=3.1.*, !=3.2.*"
 summary = "Clean single-source support for Python 3 and 2"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 files = [
     {file = "future-1.0.0-py3-none-any.whl", hash = "sha256:929292d34f5872e70396626ef385ec22355a1fae8ad29e1a734c3e43f9fbc216"},
     {file = "future-1.0.0.tar.gz", hash = "sha256:bd2968309307861edae1458a4f8a4f3598c03be43b97521076aebf5d94c07b05"},
@@ -231,6 +246,7 @@ version = "6.5.2"
 requires_python = ">=3.9"
 summary = "Read resources from Python packages"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 dependencies = [
     "zipp>=3.1.0; python_version < \"3.10\"",
 ]
@@ -245,6 +261,7 @@ version = "2.3.0"
 requires_python = ">=3.10"
 summary = "brain-dead simple config-ini parsing"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 files = [
     {file = "iniconfig-2.3.0-py3-none-any.whl", hash = "sha256:f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12"},
     {file = "iniconfig-2.3.0.tar.gz", hash = "sha256:c76315c77db068650d49c5b56314774a7804df16fee4402c1f19d6d15d8c4730"},
@@ -256,6 +273,7 @@ version = "3.1.6"
 requires_python = ">=3.7"
 summary = "A very fast and expressive template engine."
 groups = ["default"]
+marker = "python_version == \"3.13\""
 dependencies = [
     "MarkupSafe>=2.0",
 ]
@@ -270,6 +288,7 @@ version = "0.11.1"
 requires_python = "~=3.8"
 summary = "A JSON toolkit for Python developers."
 groups = ["default"]
+marker = "python_version == \"3.13\""
 dependencies = [
     "rfc3986",
 ]
@@ -283,6 +302,7 @@ name = "libusb1"
 version = "3.3.1"
 summary = "Pure-python wrapper for libusb-1.0"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 files = [
     {file = "libusb1-3.3.1-py3-none-any.whl", hash = "sha256:808c9362299dcee01651aa87e71e9d681ccedb27fc4dbd70aaf14e245fb855f1"},
     {file = "libusb1-3.3.1-py3-none-win32.whl", hash = "sha256:0ef69825173ce74af34444754c081cc324233edc6acc405658b3ad784833e076"},
@@ -296,6 +316,7 @@ version = "0.3.2"
 requires_python = ">=3.9"
 summary = "Amaranth HDL libary for building SoCs with LUNA USB peripherals."
 groups = ["default"]
+marker = "python_version == \"3.13\""
 dependencies = [
     "luna-usb~=0.2",
 ]
@@ -313,6 +334,7 @@ ref = "main"
 revision = "6771b6d4600d9929880f77e7fce618887b850f73"
 summary = "Amaranth HDL framework for FPGA-based USB solutions"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 dependencies = [
     "amaranth~=0.5.0",
     "libusb1>1.9.2",
@@ -328,6 +350,7 @@ version = "3.0.3"
 requires_python = ">=3.9"
 summary = "Safely add untrusted strings to HTML/XML markup."
 groups = ["default"]
+marker = "python_version == \"3.13\""
 files = [
     {file = "markupsafe-3.0.3-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:e1cf1972137e83c5d4c136c43ced9ac51d0e124706ee1c8aa8532c1287fa8795"},
     {file = "markupsafe-3.0.3-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:116bb52f642a37c115f517494ea5feb03889e04df47eeff5b130b1808ce7c219"},
@@ -360,6 +383,7 @@ version = "25.0"
 requires_python = ">=3.8"
 summary = "Core utilities for Python packages"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 files = [
     {file = "packaging-25.0-py3-none-any.whl", hash = "sha256:29572ef2b1f17581046b3a2227d5c611fb25ec70ca1ba8554b24b0e69331a484"},
     {file = "packaging-25.0.tar.gz", hash = "sha256:d443872c98d677bf60f6a1f2f8c1cb748e8fe762d2bf9d3148b5599295b0fc4f"},
@@ -371,6 +395,7 @@ version = "0.9.0"
 requires_python = ">=3.7"
 summary = "Parameterized testing with any Python test framework"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 files = [
     {file = "parameterized-0.9.0-py2.py3-none-any.whl", hash = "sha256:4e0758e3d41bea3bbd05ec14fc2c24736723f243b28d702081aef438c9372b1b"},
     {file = "parameterized-0.9.0.tar.gz", hash = "sha256:7fc905272cefa4f364c1a3429cbbe9c0f98b793988efb5bf90aac80f08db09b1"},
@@ -382,6 +407,7 @@ version = "4.5.1"
 requires_python = ">=3.10"
 summary = "A small Python package for determining appropriate platform-specific dirs, e.g. a `user data dir`."
 groups = ["default"]
+marker = "python_version == \"3.13\""
 files = [
     {file = "platformdirs-4.5.1-py3-none-any.whl", hash = "sha256:d03afa3963c806a9bed9d5125c8f4cb2fdaf74a55ab60e5d59b3fde758104d31"},
     {file = "platformdirs-4.5.1.tar.gz", hash = "sha256:61d5cdcc6065745cdd94f0f878977f8de9437be93de97c1c12f853c9c0cdcbda"},
@@ -393,6 +419,7 @@ version = "1.6.0"
 requires_python = ">=3.9"
 summary = "plugin and hook calling mechanisms for python"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 files = [
     {file = "pluggy-1.6.0-py3-none-any.whl", hash = "sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746"},
     {file = "pluggy-1.6.0.tar.gz", hash = "sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3"},
@@ -404,6 +431,7 @@ version = "3.0.52"
 requires_python = ">=3.8"
 summary = "Library for building powerful interactive command lines in Python"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 dependencies = [
     "wcwidth",
 ]
@@ -418,6 +446,7 @@ version = "0.5.3"
 requires_python = ">=3.8"
 summary = "Python library for programming various USB bootloaders."
 groups = ["default"]
+marker = "python_version == \"3.13\""
 dependencies = [
     "importlib-resources; python_version < \"3.9\"",
     "pyusb",
@@ -434,6 +463,7 @@ version = "2.19.2"
 requires_python = ">=3.8"
 summary = "Pygments is a syntax highlighting package written in Python."
 groups = ["default"]
+marker = "python_version == \"3.13\""
 files = [
     {file = "pygments-2.19.2-py3-none-any.whl", hash = "sha256:86540386c03d588bb81d44bc3928634ff26449851e99741617ecb9037ee5ec0b"},
     {file = "pygments-2.19.2.tar.gz", hash = "sha256:636cb2477cec7f8952536970bc533bc43743542f70392ae026374600add5b887"},
@@ -445,6 +475,7 @@ version = "2024.0.5"
 requires_python = ">=3.9"
 summary = "Python library for talking with libGreat devices"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 dependencies = [
     "backports-functools-lru-cache",
     "pyusb",
@@ -458,6 +489,7 @@ name = "pyserial"
 version = "3.5"
 summary = "Python Serial Port Extension"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 files = [
     {file = "pyserial-3.5-py2.py3-none-any.whl", hash = "sha256:c4451db6ba391ca6ca299fb3ec7bae67a5c55dde170964c7a14ceefec02f2cf0"},
     {file = "pyserial-3.5.tar.gz", hash = "sha256:3c77e014170dfffbd816e6ffc205e9842efb10be9f58ec16d3e8675b4925cddb"},
@@ -469,6 +501,7 @@ version = "9.0.2"
 requires_python = ">=3.10"
 summary = "pytest: simple powerful testing with Python"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 dependencies = [
     "colorama>=0.4; sys_platform == \"win32\"",
     "exceptiongroup>=1; python_version < \"3.11\"",
@@ -489,6 +522,7 @@ version = "3.8.0"
 requires_python = ">=3.9"
 summary = "pytest xdist plugin for distributed testing, most importantly across multiple CPUs"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 dependencies = [
     "execnet>=2.1",
     "pytest>=7.0.0",
@@ -504,6 +538,7 @@ version = "1.3.1"
 requires_python = ">=3.9.0"
 summary = "Easy USB access for Python"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 files = [
     {file = "pyusb-1.3.1-py3-none-any.whl", hash = "sha256:bf9b754557af4717fe80c2b07cc2b923a9151f5c08d17bdb5345dac09d6a0430"},
     {file = "pyusb-1.3.1.tar.gz", hash = "sha256:3af070b607467c1c164f49d5b0caabe8ac78dbed9298d703a8dbf9df4052d17e"},
@@ -515,6 +550,7 @@ version = "0.4.1"
 requires_python = ">=3.7"
 summary = "Python VCD file support"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 files = [
     {file = "pyvcd-0.4.1-py2.py3-none-any.whl", hash = "sha256:3a4c71d4dce741f1155a2ed11a6278390a0816293068f6162ad9658d20f75578"},
     {file = "pyvcd-0.4.1.tar.gz", hash = "sha256:dc6275e95a7949b8236086ab2e6d03afede73441243ec5109c9ea89077f3d696"},
@@ -525,6 +561,7 @@ name = "pyxdg"
 version = "0.28"
 summary = "PyXDG contains implementations of freedesktop.org standards in python."
 groups = ["default"]
+marker = "python_version == \"3.13\""
 files = [
     {file = "pyxdg-0.28-py2.py3-none-any.whl", hash = "sha256:bdaf595999a0178ecea4052b7f4195569c1ff4d344567bccdc12dfdf02d545ab"},
     {file = "pyxdg-0.28.tar.gz", hash = "sha256:3267bb3074e934df202af2ee0868575484108581e6f3cb006af1da35395e88b4"},
@@ -536,6 +573,7 @@ version = "2.0.0"
 requires_python = ">=3.7"
 summary = "Validating URI References per RFC 3986"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 files = [
     {file = "rfc3986-2.0.0-py2.py3-none-any.whl", hash = "sha256:50b1502b60e289cb37883f3dfd34532b8873c7de9f49bb546641ce9cbd256ebd"},
     {file = "rfc3986-2.0.0.tar.gz", hash = "sha256:97aacf9dbd4bfd829baad6e6309fa6573aaf1be3f6fa735c8ab05e46cecb261c"},
@@ -547,6 +585,7 @@ version = "0.9.0"
 requires_python = ">=3.7"
 summary = "Pretty-print tabular data"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 files = [
     {file = "tabulate-0.9.0-py3-none-any.whl", hash = "sha256:024ca478df22e9340661486f85298cff5f6dcdba14f3813e8830015b9ed1948f"},
     {file = "tabulate-0.9.0.tar.gz", hash = "sha256:0095b12bf5966de529c0feb1fa08671671b3368eec77d7ef7ab114be2c068b3c"},
@@ -558,6 +597,7 @@ version = "2.3.0"
 requires_python = ">=3.8"
 summary = "A lil' TOML parser"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 files = [
     {file = "tomli-2.3.0-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:5192f562738228945d7b13d4930baffda67b69425a7f0da96d360b0a3888136b"},
     {file = "tomli-2.3.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:be71c93a63d738597996be9528f4abe628d1adf5e6eb11607bc8fe1a510b5dae"},
@@ -577,6 +617,7 @@ version = "4.67.1"
 requires_python = ">=3.7"
 summary = "Fast, Extensible Progress Meter"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 dependencies = [
     "colorama; platform_system == \"Windows\"",
 ]
@@ -591,6 +632,7 @@ version = "0.9.2"
 requires_python = ">=3.9"
 summary = "Python library providing utilities, data structures, constants, parsers, and tools for working with the USB protocol."
 groups = ["default"]
+marker = "python_version == \"3.13\""
 dependencies = [
     "construct~=2.10",
 ]
@@ -605,6 +647,7 @@ version = "39.0.0"
 requires_python = ">=3.9"
 summary = "A WebAssembly runtime powered by Wasmtime"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 dependencies = [
     "importlib-resources>=5.10",
 ]
@@ -629,6 +672,7 @@ version = "0.2.14"
 requires_python = ">=3.6"
 summary = "Measures the displayed width of unicode strings in a terminal"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 files = [
     {file = "wcwidth-0.2.14-py2.py3-none-any.whl", hash = "sha256:a7bb560c8aee30f9957e5f9895805edd20602f2d7f720186dfd906e82b4982e1"},
     {file = "wcwidth-0.2.14.tar.gz", hash = "sha256:4d478375d31bc5395a3c55c40ccdf3354688364cd61c4f6adacaa9215d0b3605"},
@@ -639,6 +683,7 @@ name = "yowasp-nextpnr-ecp5"
 version = "0.9.0.0.post686"
 summary = "nextpnr-ecp5 FPGA place and route tool"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 dependencies = [
     "yowasp-runtime~=1.1",
 ]
@@ -652,6 +697,7 @@ version = "1.82"
 requires_python = "~=3.8"
 summary = "Common runtime for YoWASP packages"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 dependencies = [
     "importlib-resources; python_version < \"3.9\"",
     "platformdirs<5,>=3.0",
@@ -666,6 +712,7 @@ name = "yowasp-yosys"
 version = "0.52.0.0.post894"
 summary = "Yosys Open SYnthesis Suite"
 groups = ["default"]
+marker = "python_version == \"3.13\""
 dependencies = [
     "click",
     "importlib-resources; python_version < \"3.9\"",

@@ -19,7 +19,7 @@ dependencies = [
     "pytest-xdist>=3.8.0",
     "colorama>=0.4.6",
 ]
-requires-python = "==3.13.*"
+requires-python = ">=3.11"
 readme = "README.md"
 license = {text = "BSD"}
 
