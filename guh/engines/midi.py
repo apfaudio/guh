@@ -64,14 +64,12 @@ class USBMIDIHost(wiring.Component):
 
         # Watchdog: kicked on successful device responses, triggers reset on timeout
         watchdog = Signal(32)
-        watchdog_expired = Signal()
         m.d.usb += watchdog.eq(watchdog + 1)
-        m.d.comb += watchdog_expired.eq(watchdog == (self._WATCHDOG_CYCLES - 1))
 
         # MIDI RX FIFO with Packet framing
         packet_layout = Packet(unsigned(8))
-        m.submodules.midi_fifo = midi_fifo = fifo.SyncFIFOBuffered(
-            width=packet_layout.size, depth=64)
+        m.submodules.midi_fifo = midi_fifo = DomainRenamer("usb")(fifo.SyncFIFOBuffered(
+            width=packet_layout.size, depth=64))
         wiring.connect(m, midi_fifo.r_stream, wiring.flipped(self.o_midi))
 
         pid = Signal(DataPID, init=DataPID.DATA0)
@@ -132,4 +130,4 @@ class USBMIDIHost(wiring.Component):
                             pass
 
         # Watchdog triggers reset of both this module and enumerator
-        return ResetInserter({"usb": watchdog_expired})(m)
+        return ResetInserter({"usb": watchdog == (self._WATCHDOG_CYCLES - 1)})(m)

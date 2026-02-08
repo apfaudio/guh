@@ -153,8 +153,8 @@ class SCSIBulkHost(wiring.Component):
         packet_layout = Packet(unsigned(8))
 
         # RX FIFO with Packet framing (512 bytes + some margin)
-        m.submodules.rx_fifo = rx_fifo = fifo.SyncFIFOBuffered(
-            width=packet_layout.size, depth=600)
+        m.submodules.rx_fifo = rx_fifo = DomainRenamer("usb")(fifo.SyncFIFOBuffered(
+            width=packet_layout.size, depth=600))
         wiring.connect(m, rx_fifo.r_stream, wiring.flipped(self.rx_data))
 
         cbw_tag = Signal(32, init=1)
