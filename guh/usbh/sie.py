@@ -385,8 +385,8 @@ class USBSIE(wiring.Component):
         tx_multiplexer.add_input(handshake_generator.tx)
 
         # Tx/Rx FIFOs
-        m.submodules.tx_fifo = tx_fifo = fifo.SyncFIFO(width=8, depth=self.fifo_depth)
-        m.submodules.rx_fifo = rx_fifo = fifo.SyncFIFO(width=8, depth=self.fifo_depth)
+        m.submodules.tx_fifo = tx_fifo = DomainRenamer("usb")(fifo.SyncFIFO(width=8, depth=self.fifo_depth))
+        m.submodules.rx_fifo = rx_fifo = DomainRenamer("usb")(fifo.SyncFIFO(width=8, depth=self.fifo_depth))
 
         # ============================================================
         # RESET CONTROLLER - Bus Reset and Speed Detection

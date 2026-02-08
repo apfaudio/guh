@@ -283,7 +283,7 @@ class USBHostEnumerator(wiring.Component):
                     m.d.comb += sie.ctrl.bus_reset.eq(1)
                     m.d.usb += reset_triggered.eq(1)
 
-                with m.If(detected_speed != USBHostSpeed.UNKNOWN):
+                with m.Elif(detected_speed != USBHostSpeed.UNKNOWN):
                     m.d.usb += [
                         enum_retry.eq(0),
                         reset_triggered.eq(0),

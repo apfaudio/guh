@@ -86,6 +86,18 @@ class USBResetController(wiring.Component):
 
         with m.FSM(domain="usb"):
 
+            with m.State("INIT-BUS-RESET"):
+                # Force SE0 after power-on or watchdog reset, before detecting connections.
+                # XXX/TODO: this seems necessary for reliable re-plugging, even though
+                # it shouldn't be. Figure out how to remove this...
+                m.d.comb += [
+                    self.phy.op_mode.eq(UTMIOperatingModeEnum.RAW_DRIVE),
+                    self.phy.xcvr_select.eq(USBHostSpeed.HIGH),
+                    self.phy.term_select.eq(UTMITerminationSelectEnum.HS_NORMAL),
+                ]
+                with m.If(reset_counter >= self._MAX_RESET_TIME):
+                    m.next = "DISCONNECTED"
+
             with m.State("DISCONNECTED"):
                 m.d.comb += in_idle_state.eq(1)
                 with m.If(self.phy.line_state == UTMILineState.J):
