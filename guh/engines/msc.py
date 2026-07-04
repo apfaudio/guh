@@ -96,6 +96,12 @@ CBW_SIZE_BYTES = CBW.as_shape().size // 8
 CSW_SIZE_BYTES = CSW.as_shape().size // 8
 READ_CAPACITY_SIZE_BYTES = ReadCapacity10Response.as_shape().size // 8
 
+
+def byteswap(value):
+    value = Value.cast(value)
+    assert len(value) % 8 == 0
+    return Cat(value[i:i+8] for i in reversed(range(0, len(value), 8)))
+
 # ============================================================
 # USB MSC / SCSI Command Wrapper Engine
 # ============================================================
@@ -152,13 +158,17 @@ class SCSIBulkHost(wiring.Component):
         m.submodules.enumerator = enum = self.enumerator
         packet_layout = Packet(unsigned(8))
 
-        # RX FIFO with Packet framing (512 bytes + some margin)
+        # HS bulk packets are up to 512 bytes; the rx FIFO must always be able
+        # to absorb a whole packet (see DATA state).
+        MAX_BULK_PACKET_BYTES = 512
+        RX_FIFO_DEPTH = 600
+        assert RX_FIFO_DEPTH >= MAX_BULK_PACKET_BYTES
         m.submodules.rx_fifo = rx_fifo = DomainRenamer("usb")(fifo.SyncFIFOBuffered(
-            width=packet_layout.size, depth=600))
+            width=packet_layout.size, depth=RX_FIFO_DEPTH))
         wiring.connect(m, rx_fifo.r_stream, wiring.flipped(self.rx_data))
 
         cbw_tag = Signal(32, init=1)
-        tx_byte_idx = Signal(6)
+        tx_byte_idx = Signal(range(CBW_SIZE_BYTES))
         rx_byte_idx = Signal(10)
         rx_data_count = Signal(16)
         data_len = Signal(32)
@@ -271,7 +281,14 @@ class SCSIBulkHost(wiring.Component):
                             m.next = "IDLE"
 
             with m.State("DATA"):
-                with m.If(enum.ctrl.status.idle):
+                # Only issue the next bulk-IN token once rx_fifo has room for
+                # a full packet: the receive path can't pause mid-packet, so
+                # less headroom would silently drop bytes under downstream
+                # backpressure. (Captured non-stream reads bypass the FIFO.)
+                rx_has_room = Signal()
+                m.d.comb += rx_has_room.eq(
+                    (rx_fifo.depth - rx_fifo.level) >= MAX_BULK_PACKET_BYTES)
+                with m.If(enum.ctrl.status.idle & (rx_has_room | ~stream_mode)):
                     m.d.comb += start_bulk_in(endp_in)
                     m.next = "DATA-RX"
 
@@ -343,6 +360,11 @@ class SCSIBulkHost(wiring.Component):
 # (the actual high level) USB MSC Engine
 # ============================================================
 
+# Max
+MAX_BLOCKS_PER_READ = 64
+assert MAX_BLOCKS_PER_READ <= 255  # must fit the low byte of xfer_len_be
+
+
 class USBMSCHost(wiring.Component):
     """
     USB Mass Storage Class Host - read-only block device interface.
@@ -354,14 +376,19 @@ class USBMSCHost(wiring.Component):
     1. Wait for status.ready == 1
     2. Check status.block_count and status.block_size for device capacity
     3. Set cmd.lba to desired block address and strobe cmd.start
-    4. If the read succeeds, status.block_size bytes are streamed out on rx_data
-    5. Check resp.done and resp.error
+    4. If the read succeeds, up to status.block_size*(cmd.block_count+1) bytes
+       are streamed out on rx_data. Any block fetches which fail are retried
+       up to 5x before we bail (some msc devices will reject sequential block
+       fetches 1-2x depending on where you are fetching from, I haven't read
+       the spec thoroughly, just found this empirically).
+    5. Check resp.done and resp.error. resp.error is not very helpful, but
+       at least you know if something failed. For debugging resp.error
+       your next step is usually a USB analyzer :)
 
     Eventually, this engine could be used to feed a pure-gateware DMA engine.
 
     TODO: exponential backoff instead of dumb retries?
     TODO: write support?
-    TODO: cleaner way to do be/le conversion?
     """
 
     class Status(data.Struct):
@@ -372,8 +399,9 @@ class USBMSCHost(wiring.Component):
         block_count: unsigned(32)    # total number of blocks
 
     class Command(data.Struct):
-        start: unsigned(1)           # Strobe to begin read transfer
-        lba:   unsigned(32)          # block address to read
+        start:       unsigned(1)     # Strobe to begin read transfer
+        lba:         unsigned(32)    # block address to read
+        block_count: range(MAX_BLOCKS_PER_READ)  # blocks per transfer, off-by-one: 0 = 1 block
 
     class Response(data.Struct):
         done:  unsigned(1)           # Transfer complete (strobed for 1 cycle)
@@ -382,7 +410,8 @@ class USBMSCHost(wiring.Component):
     _WATCHDOG_CYCLES = 10 * 60000000  # ~10 seconds at 60MHz
                                       # Some things (like SSDs) can take >5sec to start emitting blocks.
     _INIT_RETRY_MAX = 10
-    _BLOCKS_PER_READ = 1
+    _READ_RETRY_MAX = 5               # READ_10 retries before reporting failure
+    _RETRY_DELAY_CYCLES = 2048        # ~34 µs at 60 MHz, post-CSW settling time
 
     status:  Out(Status)
     cmd:     In(Command)
@@ -413,7 +442,13 @@ class USBMSCHost(wiring.Component):
         block_size = Signal(16, init=512)
         block_count = Signal(32)
         current_lba = Signal(32)
-        init_retry = Signal(range(self._INIT_RETRY_MAX + 1))
+        current_block_count = Signal.like(self.cmd.block_count)  # off-by-one encoded
+        init_retry  = Signal(range(self._INIT_RETRY_MAX + 1))
+        read_retry  = Signal(range(self._READ_RETRY_MAX + 1))
+        retry_timer = Signal(range(self._RETRY_DELAY_CYCLES + 1))
+
+        xfer_blocks = Signal(range(MAX_BLOCKS_PER_READ + 1))  # decoded: 1..MAX_BLOCKS_PER_READ
+        m.d.comb += xfer_blocks.eq(current_block_count + 1)
 
         watchdog = Signal(32)
         watchdog_expired = Signal()
@@ -432,6 +467,20 @@ class USBMSCHost(wiring.Component):
         scsi_cmd = SCSIBulkHost.Command(scsi.cmd)
         cdb6 = CDB6(scsi_cmd.cdb.cdb6)
         cdb10 = CDB10(scsi_cmd.cdb.cdb10)
+
+        # Shared by the issue and -WAIT states of each command below.
+        read_capacity_setup = [
+            cdb10.opcode.eq(SCSIOpCode.READ_CAPACITY_10),
+            scsi_cmd.data_len.eq(READ_CAPACITY_SIZE_BYTES),
+        ]
+        read10_setup = [
+            cdb10.opcode.eq(SCSIOpCode.READ_10),
+            cdb10.lba_be.eq(byteswap(current_lba)),
+            # xfer_blocks fits in low byte; high byte is always zero.
+            cdb10.xfer_len_be.eq(Cat(Const(0, 8), xfer_blocks)),
+            scsi_cmd.data_len.eq(block_size * xfer_blocks),
+            scsi_cmd.stream_data.eq(1),
+        ]
 
         with m.FSM(domain="usb"):
 
@@ -463,29 +512,16 @@ class USBMSCHost(wiring.Component):
                             m.next = "TEST-UNIT-READY"
 
             with m.State("READ-CAPACITY"):
-                m.d.comb += [
-                    cdb10.opcode.eq(SCSIOpCode.READ_CAPACITY_10),
-                    scsi_cmd.data_len.eq(READ_CAPACITY_SIZE_BYTES),
-                    scsi_cmd.stream_data.eq(0),
-                    scsi_cmd.start.eq(1),
-                ]
+                m.d.comb += read_capacity_setup + [scsi_cmd.start.eq(1)]
                 m.next = "READ-CAPACITY-WAIT"
 
             with m.State("READ-CAPACITY-WAIT"):
-                m.d.comb += [
-                    cdb10.opcode.eq(SCSIOpCode.READ_CAPACITY_10),
-                    scsi_cmd.data_len.eq(READ_CAPACITY_SIZE_BYTES),
-                ]
+                m.d.comb += read_capacity_setup
                 with m.If(scsi.status.done):
                     with m.If(~scsi.status.error & ~scsi.status.rejected):
                         m.d.usb += watchdog.eq(0)
-                        # big-endian (scsi) to little-endian (amaranth)
-                        last_lba_le = Cat(
-                            scsi.captured.last_lba_be[24:32], scsi.captured.last_lba_be[16:24],
-                            scsi.captured.last_lba_be[8:16], scsi.captured.last_lba_be[0:8])
-                        blk_size_le = Cat(
-                            scsi.captured.block_size_be[24:32], scsi.captured.block_size_be[16:24],
-                            scsi.captured.block_size_be[8:16], scsi.captured.block_size_be[0:8])
+                        last_lba_le = byteswap(scsi.captured.last_lba_be)
+                        blk_size_le = byteswap(scsi.captured.block_size_be)
                         m.d.usb += [
                             block_count.eq(last_lba_le + 1),
                             block_size.eq(blk_size_le[0:16]),
@@ -497,44 +533,42 @@ class USBMSCHost(wiring.Component):
             with m.State("READY"):
                 m.d.comb += self.status.busy.eq(0)
                 with m.If(self.cmd.start):
-                    m.d.usb += current_lba.eq(self.cmd.lba)
+                    m.d.usb += [
+                        current_lba.eq(self.cmd.lba),
+                        current_block_count.eq(self.cmd.block_count),
+                        read_retry.eq(0),
+                    ]
                     m.next = "READ"
 
             with m.State("READ"):
-                m.d.comb += [
-                    cdb10.opcode.eq(SCSIOpCode.READ_10),
-                    # little-endian (amaranth) to big-endian (scsi)
-                    cdb10.lba_be.eq(Cat(
-                        current_lba[24:32], current_lba[16:24],
-                        current_lba[8:16], current_lba[0:8])),
-                    cdb10.xfer_len_be.eq(Cat(
-                        Const(self._BLOCKS_PER_READ >> 8, 8),
-                        Const(self._BLOCKS_PER_READ & 0xFF, 8))),
-                    scsi_cmd.data_len.eq(block_size * self._BLOCKS_PER_READ),
-                    scsi_cmd.stream_data.eq(1),
-                    scsi_cmd.start.eq(1),
-                ]
+                m.d.comb += read10_setup + [scsi_cmd.start.eq(1)]
                 m.next = "READ-WAIT"
 
             with m.State("READ-WAIT"):
-                m.d.comb += [
-                    cdb10.opcode.eq(SCSIOpCode.READ_10),
-                    cdb10.lba_be.eq(Cat(
-                        current_lba[24:32], current_lba[16:24],
-                        current_lba[8:16], current_lba[0:8])),
-                    cdb10.xfer_len_be.eq(Cat(
-                        Const(self._BLOCKS_PER_READ >> 8, 8),
-                        Const(self._BLOCKS_PER_READ & 0xFF, 8))),
-                    scsi_cmd.data_len.eq(block_size * self._BLOCKS_PER_READ),
-                    scsi_cmd.stream_data.eq(1),
-                ]
+                m.d.comb += read10_setup
                 with m.If(scsi.status.done):
-                    with m.If(~scsi.status.error & ~scsi.status.rejected):
-                        m.d.usb += watchdog.eq(0)
-                    m.d.comb += [
-                        self.resp.done.eq(1),
-                        self.resp.error.eq(scsi.status.error | scsi.status.rejected),
-                    ]
-                    m.next = "READY"
+                    failed = scsi.status.error | scsi.status.rejected
+                    with m.If(failed & (read_retry < self._READ_RETRY_MAX)):
+                        # Transient failure (NAK / PHASE_ERROR / etc.)
+                        m.d.usb += [
+                            read_retry.eq(read_retry + 1),
+                            retry_timer.eq(self._RETRY_DELAY_CYCLES),
+                        ]
+                        m.next = "READ-RETRY-DELAY"
+                    with m.Else():
+                        # Success, or out of retry budget.
+                        with m.If(~failed):
+                            m.d.usb += watchdog.eq(0)
+                        m.d.usb += read_retry.eq(0)
+                        m.d.comb += [
+                            self.resp.done.eq(1),
+                            self.resp.error.eq(failed),
+                        ]
+                        m.next = "READY"
+
+            with m.State("READ-RETRY-DELAY"):
+                m.d.usb += retry_timer.eq(retry_timer - 1)
+                with m.If(retry_timer == 0):
+                    m.next = "READ"
 
         return ResetInserter({"usb": watchdog_expired})(m)

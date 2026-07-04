@@ -114,7 +114,8 @@ class FakeUSBMSCDevice(Elaboratable):
     BLOCK_COUNT = 1024  # 512KB total
 
     def __init__(self, max_packet_size=64, full_speed_only=False):
-        self.max_packet_size = max_packet_size
+        self.ep0_max_packet_size = min(max_packet_size, 64)  # EP0 caps at 64
+        self.bulk_max_packet_size = max_packet_size
         self.full_speed_only = full_speed_only
         self.utmi = UTMIInterface()
         super().__init__()
@@ -128,7 +129,7 @@ class FakeUSBMSCDevice(Elaboratable):
             d.iProduct           = "MSC Device"
             d.iSerialNumber      = "1234"
             d.bNumConfigurations = 1
-            d.bMaxPacketSize0    = self.max_packet_size
+            d.bMaxPacketSize0    = self.ep0_max_packet_size
 
         with descriptors.ConfigurationDescriptor() as c:
             with c.InterfaceDescriptor() as i:
@@ -139,11 +140,11 @@ class FakeUSBMSCDevice(Elaboratable):
                 with i.EndpointDescriptor() as e:
                     e.bEndpointAddress = 0x02  # OUT EP2
                     e.bmAttributes     = 0x02  # Bulk
-                    e.wMaxPacketSize   = self.max_packet_size
+                    e.wMaxPacketSize   = self.bulk_max_packet_size
                 with i.EndpointDescriptor() as e:
                     e.bEndpointAddress = 0x81  # IN EP1
                     e.bmAttributes     = 0x02  # Bulk
-                    e.wMaxPacketSize   = self.max_packet_size
+                    e.wMaxPacketSize   = self.bulk_max_packet_size
         return descriptors
 
     def elaborate(self, platform):
@@ -151,21 +152,21 @@ class FakeUSBMSCDevice(Elaboratable):
 
         m.submodules.usb = usb = USBHSDevice(full_speed_only=self.full_speed_only, bus=self.utmi)
         descriptors = self.create_descriptors()
-        control_endpoint = USBControlEndpoint(utmi=self.utmi, max_packet_size=self.max_packet_size)
+        control_endpoint = USBControlEndpoint(utmi=self.utmi, max_packet_size=self.ep0_max_packet_size)
         control_endpoint.add_standard_request_handlers(descriptors)
         usb.add_endpoint(control_endpoint)
 
         # Bulk OUT endpoint for receiving CBW
         stream_out = USBStreamOutEndpoint(
             endpoint_number=2,
-            max_packet_size=self.max_packet_size
+            max_packet_size=self.bulk_max_packet_size
         )
         usb.add_endpoint(stream_out)
 
         # Bulk IN endpoint for sending data and CSW
         stream_in = USBStreamInEndpoint(
             endpoint_number=1,
-            max_packet_size=self.max_packet_size
+            max_packet_size=self.bulk_max_packet_size
         )
         usb.add_endpoint(stream_in)
 
@@ -185,13 +186,8 @@ class FakeUSBMSCDevice(Elaboratable):
         last_lba = self.BLOCK_COUNT - 1
         cap_response = Signal(ReadCapacity10Response)
         m.d.comb += [
-            # For big-endian wire order: MSB goes to bits[0:8], LSB to bits[24:32]
-            cap_response.last_lba_be.eq(Cat(
-                Const(last_lba >> 24, 8), Const(last_lba >> 16, 8),
-                Const(last_lba >> 8, 8), Const(last_lba >> 0, 8))),
-            cap_response.block_size_be.eq(Cat(
-                Const(self.BLOCK_SIZE >> 24, 8), Const(self.BLOCK_SIZE >> 16, 8),
-                Const(self.BLOCK_SIZE >> 8, 8), Const(self.BLOCK_SIZE >> 0, 8))),
+            cap_response.last_lba_be.eq(byteswap(Const(last_lba, 32))),
+            cap_response.block_size_be.eq(byteswap(Const(self.BLOCK_SIZE, 32))),
         ]
         cap_flat = cap_response.as_value()
 
@@ -203,9 +199,14 @@ class FakeUSBMSCDevice(Elaboratable):
         cbw_flat = cbw.as_value()
         cbw_byte_idx = Signal(6)
 
-        # Extract LBA from CDB10 (be to le)
-        lba_be = cbw.CBWCB.cdb10.lba_be
-        cbw_lba = Cat(lba_be[24:32], lba_be[16:24], lba_be[8:16], lba_be[0:8])
+        # Extract LBA and transfer length (block count) from CDB10
+        cbw_lba = byteswap(cbw.CBWCB.cdb10.lba_be)
+        cbw_xfer_len = byteswap(cbw.CBWCB.cdb10.xfer_len_be)
+
+        # Total bytes to transfer = xfer_len * BLOCK_SIZE
+        max_xfer_bytes = MAX_BLOCKS_PER_READ * self.BLOCK_SIZE
+        xfer_total_bytes = Signal(range(max_xfer_bytes + 1))
+        m.d.comb += xfer_total_bytes.eq(cbw_xfer_len * self.BLOCK_SIZE)
 
         # ================================================================
         # TEST_UNIT_READY simulation (fail first 2 attempts)
@@ -232,7 +233,7 @@ class FakeUSBMSCDevice(Elaboratable):
         # Outgoing data generation
         # ================================================================
 
-        tx_byte_idx = Signal(10)
+        tx_byte_idx = Signal(range(max_xfer_bytes))
         # Block data pattern: byte index XOR'd with LBA
         block_data_byte = Signal(8)
         m.d.comb += block_data_byte.eq(tx_byte_idx[0:8] ^ cbw_lba[0:8])
@@ -301,7 +302,7 @@ class FakeUSBMSCDevice(Elaboratable):
                         m.next = "SEND-CSW"
 
             with m.State("SEND-DATA"):
-                is_last_byte = (tx_byte_idx == (self.BLOCK_SIZE - 1))
+                is_last_byte = (tx_byte_idx == (xfer_total_bytes - 1))
                 m.d.comb += [
                     stream_in.stream.valid.eq(1),
                     stream_in.stream.payload.eq(block_data_byte),
