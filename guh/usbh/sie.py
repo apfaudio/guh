@@ -211,7 +211,10 @@ class USBSOFController(wiring.Component):
     Use ResetInserter to hold this component in reset until enumeration is complete.
 
     TODO: `txa` window is overly conservative for now. We could make it much wider
-    for more bandwidth, at the moment we're limited to ~half the link.
+    for more bandwidth, at the moment we're limited to ~half the link in FS. in HS
+    we're much closer to the limit. This is just because I empirically found
+    widening the window would stop some FS devices from enumerating properly,
+    probably due to a bug I haven't squashed yet :)
 
     TODO: `TX_TO_RX` is kind of meaningless WRT the USB standard, and it's kind of
     an implementation detail as to how this USB Host implementation works. Perhaps
@@ -229,11 +232,11 @@ class USBSOFController(wiring.Component):
     _SOF_TX_TO_TX_MAX_FS = 7*6000   # 0.7ms - end of TX window
     _SOF_TX_TO_RX_MAX_FS = 9*6000   # 0.9ms - end of RX window
 
-    # HS: emit a SOF packet every 125us (microframe)
+    # HS: emit a SOF packet every 125us (microframe).
     _SOF_CYCLES_HS = 7500
-    _SOF_TX_TO_TX_MIN_HS = 2*750    # ~25us - start of TX window
-    _SOF_TX_TO_TX_MAX_HS = 7*750    # ~87us - end of TX window
-    _SOF_TX_TO_RX_MAX_HS = 9*750    # ~112us - end of RX window
+    _SOF_TX_TO_TX_MIN_HS = 60       # ~1us - SOF tx + post-transmit gap
+    _SOF_TX_TO_TX_MAX_HS = 6600     # ~110us - end of TX window
+    _SOF_TX_TO_RX_MAX_HS = 7440     # ~124us - end of RX window
 
     def elaborate(self, platform):
         m = Module()
@@ -331,12 +334,12 @@ class USBSIE(wiring.Component):
 
     ctrl: Out(USBSIEInterface())
 
-    # TODO: check these against standard, I think they're overly conservative.
-    _XFER_IPD_FS = 1000  # Inter-packet delay for Full-Speed
-    _XFER_IPD_HS = 100   # Inter-packet delay for High-Speed
+    _XFER_IPD_FS = 1000  # Inter-packet delay for Full-Speed (TODO why so long?...)
+    _XFER_IPD_HS = 24    # Inter-packet delay for High-Speed: 192 HS bit times,
+                         # the spec max turnaround (USB 2.0 7.1.19.2).
 
-    def __init__(self, *, bus=None, handle_clocking=True, fullspeed_only=False):
-        self.fifo_depth = 64  # Max USB packet size
+    def __init__(self, *, bus=None, handle_clocking=True, fullspeed_only=False, fifo_depth=64):
+        self.fifo_depth = fifo_depth
 
         # UTMI interface (TODO: move to component signature once Records removed from LUNA)
         # TODO: support also non-ULPI interfaces? should be pretty easy...

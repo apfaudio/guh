@@ -232,10 +232,10 @@ def patch_usb_timing_for_simulation():
     USBSOFController._SOF_TX_TO_TX_MIN_FS //= 10
     USBSOFController._SOF_TX_TO_TX_MAX_FS //= 10
     USBSOFController._SOF_TX_TO_RX_MAX_FS //= 10
-    USBSOFController._SOF_CYCLES_HS //= 10
-    USBSOFController._SOF_TX_TO_TX_MIN_HS //= 10
-    USBSOFController._SOF_TX_TO_TX_MAX_HS //= 10
-    USBSOFController._SOF_TX_TO_RX_MAX_HS //= 10
+    USBSOFController._SOF_CYCLES_HS //= 2
+    USBSOFController._SOF_TX_TO_TX_MIN_HS //= 2
+    USBSOFController._SOF_TX_TO_TX_MAX_HS = USBSOFController._SOF_CYCLES_HS - 900
+    USBSOFController._SOF_TX_TO_RX_MAX_HS = USBSOFController._SOF_CYCLES_HS - 60
     USBHostEnumerator._SOF_DELAY_RDY = 1 # only wait for one SOF on startup
 
 
