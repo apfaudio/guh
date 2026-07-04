@@ -412,6 +412,7 @@ class USBMSCHost(wiring.Component):
     _INIT_RETRY_MAX = 10
     _READ_RETRY_MAX = 5               # READ_10 retries before reporting failure
     _RETRY_DELAY_CYCLES = 2048        # ~34 µs at 60 MHz, post-CSW settling time
+    _DEFAULT_BLOCK_SIZE_BYTES = 512   # vast majority of block devices use 512-byte blocks
 
     status:  Out(Status)
     cmd:     In(Command)
@@ -439,7 +440,7 @@ class USBMSCHost(wiring.Component):
 
         wiring.connect(m, scsi.rx_data, wiring.flipped(self.rx_data))
 
-        block_size = Signal(16, init=512)
+        block_size = Signal(16, init=self._DEFAULT_BLOCK_SIZE_BYTES)
         block_count = Signal(32)
         current_lba = Signal(32)
         current_block_count = Signal.like(self.cmd.block_count)  # off-by-one encoded
