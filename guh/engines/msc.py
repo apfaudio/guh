@@ -307,6 +307,11 @@ class SCSIBulkHost(wiring.Component):
                                 m.next = "DATA-OUT-LOAD"
                             with m.Else():
                                 m.next = "DATA"
+                        with m.Case(TransferResponse.NAK):
+                            # Pure flow control: the device never accepted the
+                            # command, so resend the same CBW with the same
+                            # data toggle.
+                            m.next = "CBW-LOAD"
                         with m.Default():
                             m.d.comb += [
                                 self.status.done.eq(1),
@@ -439,15 +444,18 @@ class SCSIBulkHost(wiring.Component):
                 with m.If(enum.ctrl.status.idle):
                     with m.Switch(enum.ctrl.status.response):
                         with m.Case(TransferResponse.ACK):
-                            m.d.usb += [
-                                pid_in.eq(Mux(pid_in, DataPID.DATA0, DataPID.DATA1)),
-                                cbw_tag.eq(cbw_tag + 1),
-                            ]
-                            m.d.comb += [
-                                self.status.done.eq(1),
-                                self.status.error.eq(csw_sig.bCSWStatus != CSWStatus.PASSED),
-                            ]
-                            m.next = "IDLE"
+                            m.d.usb += pid_in.eq(Mux(pid_in, DataPID.DATA0, DataPID.DATA1))
+                            with m.If(rx_byte_idx == 0):
+                                # Zero-length packet, not a CSW: toggle and
+                                # poll again.
+                                m.next = "CSW"
+                            with m.Else():
+                                m.d.usb += cbw_tag.eq(cbw_tag + 1)
+                                m.d.comb += [
+                                    self.status.done.eq(1),
+                                    self.status.error.eq(csw_sig.bCSWStatus != CSWStatus.PASSED),
+                                ]
+                                m.next = "IDLE"
                         with m.Case(TransferResponse.NAK):
                             m.next = "CSW"
 
