@@ -6,8 +6,9 @@
 USB Mass Storage Class / DMA engine peripheral.
 
 Provides a CSR interface for a SoC to enumerate
-a block device, enqueue block read requests, and autonomously
-execute them as burst writes to a provided wishbone bus.
+a block device, enqueue block read/write requests, and autonomously
+execute them as burst transfers on a provided wishbone bus
+(bus writes for block reads, bus reads for block writes).
 """
 
 from amaranth import *
@@ -17,7 +18,7 @@ from amaranth_soc import csr, wishbone
 
 from guh.engines.msc import USBMSCHost, MAX_BLOCKS_PER_XFER
 from guh.periph.dma import DMAEngine
-from guh.util.gearbox import Pack, Unframe
+from guh.util.gearbox import Pack, Unpack, Unframe
 
 
 # Block size is fixed rather than read from host.status.block_size: making it
@@ -31,12 +32,14 @@ class Peripheral(wiring.Component):
     """
     USB MSC peripheral.
 
-    The CPU can enqueue `fifo_depth` block read requests. Each request
-    specifies a starting (src) LBA, a target PSRAM address and a block count
-    (1..MAX_BLOCKS_PER_XFER); the peripheral fetches N contiguous blocks
-    and DMAs them sequentially to the destination PSRAM location.
+    The CPU can enqueue `fifo_depth` block transfer requests. Each request
+    specifies a starting LBA, a PSRAM address, a block count
+    (1..MAX_BLOCKS_PER_XFER) and a direction; the peripheral transfers N
+    contiguous blocks between the device and PSRAM. Block reads DMA device
+    data into PSRAM; block writes (cmd_dir.write=1) fetch data from PSRAM
+    and send it to the device.
 
-    The default settings - 512-byte blocks, max 64-block reads and 8-deep
+    The default settings - 512-byte blocks, max 64-block transfers and 8-deep
     command FIFO permits the CPU to enqueue up to 256KiB of transfers at
     a time. This is enough to saturate USB2 HS (~40MiB/sec) if an ISR
     services this peripheral every 5ms or so.
@@ -44,7 +47,8 @@ class Peripheral(wiring.Component):
     Usage:
     1. Poll `status` register until `ready` is set (MSC device enumerated)
     2. Optionally check `capacity` and `block_size` for device info
-    3. Write `cmd_lba`, `cmd_addr` and `cmd_blocks` to set up a request
+    3. Write `cmd_lba`, `cmd_addr`, `cmd_blocks` and `cmd_dir` to set up
+       a request
     4. Write 1 to `cmd_start` to enqueue the request
     5. For cmd completion checking, check the upcounters (warn: they wrap)
        `cmds_done` and `errors` as well as `status.fifo_empty` and
@@ -52,6 +56,8 @@ class Peripheral(wiring.Component):
        multiple in-flight commands, you may only need to check a subset
        of these completion registers.
 
+    WARN: for writes, the PSRAM source contents must not be modified until
+    the command completes (the DMA engine reads them live).
 
     WARN: this currently assumes 'sync' and 'usb' clock domains are the same!
     """
@@ -61,19 +67,23 @@ class Peripheral(wiring.Component):
     #
 
     class CmdLbaReg(csr.Register, access="rw"):
-        """src LBA to read."""
+        """starting LBA on the device."""
         lba: csr.Field(csr.action.RW, unsigned(32))
 
     class CmdAddrReg(csr.Register, access="rw"):
-        """dst PSRAM address (byte address, low 2 bits ignored)."""
+        """PSRAM address (byte address, low 2 bits ignored)."""
         addr: csr.Field(csr.action.RW, unsigned(32))
 
     class CmdBlocksReg(csr.Register, access="rw"):
-        """N contiguous blocks to read, 1..MAX_BLOCKS_PER_XFER."""
+        """N contiguous blocks to transfer, 1..MAX_BLOCKS_PER_XFER."""
         blocks: csr.Field(csr.action.RW, range(MAX_BLOCKS_PER_XFER+1), init=1)
 
+    class CmdDirReg(csr.Register, access="rw"):
+        """Direction: 0 = read (device to PSRAM), 1 = write (PSRAM to device)."""
+        write: csr.Field(csr.action.RW, unsigned(1))
+
     class CmdStartReg(csr.Register, access="w"):
-        """Write 1 to enqueue command with last LBA/addr/blocks."""
+        """Write 1 to enqueue command with last LBA/addr/blocks/dir."""
         start: csr.Field(csr.action.W, unsigned(1))
 
     #
@@ -112,6 +122,7 @@ class Peripheral(wiring.Component):
         lba:       unsigned(32)               # msc lba
         addr_w:    unsigned(30)               # psram word address (cmd_addr >> 2)
         blocks_m1: range(MAX_BLOCKS_PER_XFER) # blocks to transfer - 1
+        write:     unsigned(1)                # 1 = PSRAM -> device
 
     #
     # Constants
@@ -151,6 +162,7 @@ class Peripheral(wiring.Component):
         self._cmds_done  = regs.add("cmds_done",  self.CmdsDoneReg(),  offset=0x18)
         self._errors     = regs.add("errors",     self.ErrorsReg(),    offset=0x1C)
         self._cmd_blocks = regs.add("cmd_blocks", self.CmdBlocksReg(), offset=0x20)
+        self._cmd_dir    = regs.add("cmd_dir",    self.CmdDirReg(),    offset=0x24)
 
         self._bridge = csr.Bridge(regs.as_memory_map())
 
@@ -198,6 +210,7 @@ class Peripheral(wiring.Component):
             cmd_payload.lba.eq(self._cmd_lba.f.lba.data),
             cmd_payload.addr_w.eq(self._cmd_addr.f.addr.data[2:]),
             cmd_payload.blocks_m1.eq(self._cmd_blocks.f.blocks.data - 1),
+            cmd_payload.write.eq(self._cmd_dir.f.write.data),
             # Enqueue while full is silently dropped - TODO increment errors?
             cmd_fifo.w_en.eq(self._cmd_start.f.start.w_stb & self._cmd_start.f.start.w_data),
         ]
@@ -236,18 +249,22 @@ class Peripheral(wiring.Component):
             stage_words=self._DATA_FIFO_WORDS, data_width=self._DMA_DATA_WIDTH)
         wiring.connect(m, wiring.flipped(self.dma_bus), dma.bus)
 
-        # `flush` restarts pack's byte lanes on command hand-off/abort and on
-        # each rx packet's last byte, so a mis-sized packet can't misalign the
-        # rest (sync reset: lands where the next packet begins).
+        # `flush` restarts the (un)packer byte lanes on hand-off/abort and on
+        # each rx packet's last byte (a no-op for unpack, only one direction is
+        # ever in flight), so a mis-sized packet can't misalign the rest.
         data_flush = Signal()   # command hand-off / abort
         flush      = Signal()   # packer byte-lane reset
         m.submodules.unframe = unframe = Unframe(unsigned(8))
         m.submodules.pack    = pack    = ResetInserter(flush)(
             Pack(self._DMA_DATA_WIDTH))
+        m.submodules.unpack  = unpack  = ResetInserter(flush)(
+            Unpack(self._DMA_DATA_WIDTH))
         wiring.connect(m, msc_host.rx_data, unframe.i)
         wiring.connect(m, unframe.o, pack.i)
         m.d.comb += flush.eq(data_flush | unframe.last)
         wiring.connect(m, pack.o, dma.rx)
+        wiring.connect(m, dma.tx, unpack.i)
+        wiring.connect(m, unpack.o, msc_host.tx_data)
 
         #
         # SCSI/CMD FSM: RUN holds until both the bulk transfer and DMA drain
@@ -278,8 +295,10 @@ class Peripheral(wiring.Component):
                         data_flush.eq(1),
                         msc_host.cmd.lba.eq(fifo_cmd.lba),
                         msc_host.cmd.block_count.eq(fifo_cmd.blocks_m1),
+                        msc_host.cmd.write.eq(fifo_cmd.write),
                         msc_host.cmd.start.eq(1),
                         dma.cmd.valid.eq(1),
+                        dma.cmd.payload.write.eq(fifo_cmd.write),
                         dma.cmd.payload.addr.eq(fifo_cmd.addr_w),
                         # block -> word translation lives here, not in the engine.
                         dma.cmd.payload.words.eq(
