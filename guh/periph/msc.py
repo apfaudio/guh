@@ -17,7 +17,7 @@ from amaranth_soc import csr, wishbone
 
 from luna.gateware.stream.future import Packet
 
-from guh.engines.msc import USBMSCHost, MAX_BLOCKS_PER_READ
+from guh.engines.msc import USBMSCHost, MAX_BLOCKS_PER_XFER
 
 
 class Pack8to32(wiring.Component):
@@ -55,7 +55,7 @@ class Peripheral(wiring.Component):
 
     The CPU can enqueue `fifo_depth` block read requests. Each request
     specifies a starting (src) LBA, a target PSRAM address and a block count
-    (1..MAX_BLOCKS_PER_READ); the peripheral fetches N contiguous blocks
+    (1..MAX_BLOCKS_PER_XFER); the peripheral fetches N contiguous blocks
     and DMAs them sequentially to the destination PSRAM location.
 
     The default settings - 512-byte blocks, max 64-block reads and 8-deep
@@ -91,8 +91,8 @@ class Peripheral(wiring.Component):
         addr: csr.Field(csr.action.RW, unsigned(32))
 
     class CmdBlocksReg(csr.Register, access="rw"):
-        """N contiguous blocks to read, 1..MAX_BLOCKS_PER_READ."""
-        blocks: csr.Field(csr.action.RW, range(MAX_BLOCKS_PER_READ+1), init=1)
+        """N contiguous blocks to read, 1..MAX_BLOCKS_PER_XFER."""
+        blocks: csr.Field(csr.action.RW, range(MAX_BLOCKS_PER_XFER+1), init=1)
 
     class CmdStartReg(csr.Register, access="w"):
         """Write 1 to enqueue command with last LBA/addr/blocks."""
@@ -133,7 +133,7 @@ class Peripheral(wiring.Component):
     class DMACommand(data.Struct):
         lba:       unsigned(32)               # msc lba
         addr_w:    unsigned(30)               # psram word address (cmd_addr >> 2)
-        blocks_m1: range(MAX_BLOCKS_PER_READ) # blocks to transfer - 1
+        blocks_m1: range(MAX_BLOCKS_PER_XFER) # blocks to transfer - 1
 
     #
     # Constants
@@ -244,7 +244,7 @@ class Peripheral(wiring.Component):
         # Shared state between both FSMs
         #
 
-        MAX_TOTAL_WORDS = self._WORDS_PER_BLOCK * MAX_BLOCKS_PER_READ
+        MAX_TOTAL_WORDS = self._WORDS_PER_BLOCK * MAX_BLOCKS_PER_XFER
 
         # In-flight command
         current_cmd  = Signal(self.DMACommand)

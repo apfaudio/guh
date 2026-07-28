@@ -204,7 +204,7 @@ class FakeUSBMSCDevice(Elaboratable):
         cbw_xfer_len = byteswap(cbw.CBWCB.cdb10.xfer_len_be)
 
         # Total bytes to transfer = xfer_len * BLOCK_SIZE
-        max_xfer_bytes = MAX_BLOCKS_PER_READ * self.BLOCK_SIZE
+        max_xfer_bytes = MAX_BLOCKS_PER_XFER * self.BLOCK_SIZE
         xfer_total_bytes = Signal(range(max_xfer_bytes + 1))
         m.d.comb += xfer_total_bytes.eq(cbw_xfer_len * self.BLOCK_SIZE)
 

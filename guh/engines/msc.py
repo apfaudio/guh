@@ -38,6 +38,7 @@ class SCSIOpCode(enum.Enum, shape=unsigned(8)):
     REQUEST_SENSE    = 0x03
     READ_CAPACITY_10 = 0x25
     READ_10          = 0x28
+    WRITE_10         = 0x2A
 
 
 class CBWFlags(enum.Enum, shape=unsigned(8)):
@@ -466,35 +467,36 @@ class SCSIBulkHost(wiring.Component):
 # (the actual high level) USB MSC Engine
 # ============================================================
 
-# Max
-MAX_BLOCKS_PER_READ = 64
-assert MAX_BLOCKS_PER_READ <= 255  # must fit the low byte of xfer_len_be
+# Max blocks per READ_10 / WRITE_10 transfer.
+MAX_BLOCKS_PER_XFER = 64
+assert MAX_BLOCKS_PER_XFER <= 255  # must fit the low byte of xfer_len_be
 
 
 class USBMSCHost(wiring.Component):
     """
-    USB Mass Storage Class Host - read-only block device interface.
+    USB Mass Storage Class Host - block device interface.
 
     Performs MSC-specific SCSI initialization (TEST UNIT READY, READ CAPACITY)
-    before accepting block read commands.
+    before accepting block read/write commands.
 
     Usage:
     1. Wait for status.ready == 1
     2. Check status.block_count and status.block_size for device capacity
-    3. Set cmd.lba to desired block address and strobe cmd.start
-    4. If the read succeeds, up to status.block_size*(cmd.block_count+1) bytes
-       are streamed out on rx_data. Any block fetches which fail are retried
-       up to 5x before we bail (some msc devices will reject sequential block
-       fetches 1-2x depending on where you are fetching from, I haven't read
-       the spec thoroughly, just found this empirically).
+    3. Set cmd.lba to desired block address (and cmd.write for writes) and
+       strobe cmd.start
+    4. Reads: if the read succeeds, up to status.block_size*(cmd.block_count+1)
+       bytes are streamed out on rx_data. Any block fetches which fail are
+       retried up to 5x before we bail (some msc devices will reject sequential
+       block fetches 1-2x depending on where you are fetching from, I haven't
+       read the spec thoroughly, just found this empirically).
+       Writes: the same byte count is consumed from tx_data. Failed writes are
+       NOT retried (the data stream was already consumed); on resp.error the
+       caller must flush its own data source before the next command.
     5. Check resp.done and resp.error. resp.error is not very helpful, but
        at least you know if something failed. For debugging resp.error
        your next step is usually a USB analyzer :)
 
-    Eventually, this engine could be used to feed a pure-gateware DMA engine.
-
     TODO: exponential backoff instead of dumb retries?
-    TODO: write support?
     """
 
     class Status(data.Struct):
@@ -505,9 +507,10 @@ class USBMSCHost(wiring.Component):
         block_count: unsigned(32)    # total number of blocks
 
     class Command(data.Struct):
-        start:       unsigned(1)     # Strobe to begin read transfer
-        lba:         unsigned(32)    # block address to read
-        block_count: range(MAX_BLOCKS_PER_READ)  # blocks per transfer, off-by-one: 0 = 1 block
+        start:       unsigned(1)     # Strobe to begin transfer
+        write:       unsigned(1)     # 0 = READ_10, 1 = WRITE_10
+        lba:         unsigned(32)    # starting block address
+        block_count: range(MAX_BLOCKS_PER_XFER)  # blocks per transfer, off-by-one: 0 = 1 block
 
     class Response(data.Struct):
         done:  unsigned(1)           # Transfer complete (strobed for 1 cycle)
@@ -524,6 +527,7 @@ class USBMSCHost(wiring.Component):
     cmd:     In(Command)
     resp:    Out(Response)
     rx_data: Out(stream.Signature(Packet(unsigned(8))))
+    tx_data: In(stream.Signature(unsigned(8)))
 
     def __init__(self, *, bus=None, handle_clocking=True, device_address=0x12):
         self.scsi = SCSIBulkHost(
@@ -545,16 +549,18 @@ class USBMSCHost(wiring.Component):
         enum = scsi.enumerator
 
         wiring.connect(m, scsi.rx_data, wiring.flipped(self.rx_data))
+        wiring.connect(m, wiring.flipped(self.tx_data), scsi.tx_data)
 
         block_size = Signal(16, init=self._DEFAULT_BLOCK_SIZE_BYTES)
         block_count = Signal(32)
         current_lba = Signal(32)
+        current_write = Signal()
         current_block_count = Signal.like(self.cmd.block_count)  # off-by-one encoded
         init_retry  = Signal(range(self._INIT_RETRY_MAX + 1))
         read_retry  = Signal(range(self._READ_RETRY_MAX + 1))
         retry_timer = Signal(range(self._RETRY_DELAY_CYCLES + 1))
 
-        xfer_blocks = Signal(range(MAX_BLOCKS_PER_READ + 1))  # decoded: 1..MAX_BLOCKS_PER_READ
+        xfer_blocks = Signal(range(MAX_BLOCKS_PER_XFER + 1))  # decoded: 1..MAX_BLOCKS_PER_XFER
         m.d.comb += xfer_blocks.eq(current_block_count + 1)
 
         watchdog = Signal(32)
@@ -580,13 +586,15 @@ class USBMSCHost(wiring.Component):
             cdb10.opcode.eq(SCSIOpCode.READ_CAPACITY_10),
             scsi_cmd.data_len.eq(READ_CAPACITY_SIZE_BYTES),
         ]
-        read10_setup = [
-            cdb10.opcode.eq(SCSIOpCode.READ_10),
+        xfer10_setup = [
+            cdb10.opcode.eq(Mux(current_write, SCSIOpCode.WRITE_10,
+                                               SCSIOpCode.READ_10)),
             cdb10.lba_be.eq(byteswap(current_lba)),
             # xfer_blocks fits in low byte; high byte is always zero.
             cdb10.xfer_len_be.eq(Cat(Const(0, 8), xfer_blocks)),
             scsi_cmd.data_len.eq(block_size * xfer_blocks),
             scsi_cmd.stream_data.eq(1),
+            scsi_cmd.dir_out.eq(current_write),
         ]
 
         with m.FSM(domain="usb"):
@@ -642,26 +650,31 @@ class USBMSCHost(wiring.Component):
                 with m.If(self.cmd.start):
                     m.d.usb += [
                         current_lba.eq(self.cmd.lba),
+                        current_write.eq(self.cmd.write),
                         current_block_count.eq(self.cmd.block_count),
                         read_retry.eq(0),
                     ]
-                    m.next = "READ"
+                    m.next = "XFER"
 
-            with m.State("READ"):
-                m.d.comb += read10_setup + [scsi_cmd.start.eq(1)]
-                m.next = "READ-WAIT"
+            with m.State("XFER"):
+                m.d.comb += xfer10_setup + [scsi_cmd.start.eq(1)]
+                m.next = "XFER-WAIT"
 
-            with m.State("READ-WAIT"):
-                m.d.comb += read10_setup
+            with m.State("XFER-WAIT"):
+                m.d.comb += xfer10_setup
                 with m.If(scsi.status.done):
                     failed = scsi.status.error | scsi.status.rejected
-                    with m.If(failed & (read_retry < self._READ_RETRY_MAX)):
+                    # Only reads are retried: retrying a WRITE_10 would need
+                    # the already-consumed tx_data stream replayed from the
+                    # start, which is the caller's call to make.
+                    with m.If(failed & ~current_write &
+                              (read_retry < self._READ_RETRY_MAX)):
                         # Transient failure (NAK / PHASE_ERROR / etc.)
                         m.d.usb += [
                             read_retry.eq(read_retry + 1),
                             retry_timer.eq(self._RETRY_DELAY_CYCLES),
                         ]
-                        m.next = "READ-RETRY-DELAY"
+                        m.next = "XFER-RETRY-DELAY"
                     with m.Else():
                         # Success, or out of retry budget.
                         with m.If(~failed):
@@ -673,9 +686,9 @@ class USBMSCHost(wiring.Component):
                         ]
                         m.next = "READY"
 
-            with m.State("READ-RETRY-DELAY"):
+            with m.State("XFER-RETRY-DELAY"):
                 m.d.usb += retry_timer.eq(retry_timer - 1)
                 with m.If(retry_timer == 0):
-                    m.next = "READ"
+                    m.next = "XFER"
 
         return ResetInserter({"usb": watchdog_expired})(m)
