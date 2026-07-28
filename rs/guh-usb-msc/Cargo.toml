@@ -1,0 +1,15 @@
+[package]
+name = "guh-usb-msc"
+version = "0.0.0"
+edition = "2021"
+categories = ["embedded", "hardware-support", "no-std"]
+description = "HAL for the guh USB Mass Storage Class DMA peripheral."
+
+[lib]
+test = true
+bench = false
+
+[dependencies]
+guh-dma = { path = "../guh-dma" }
+critical-section = "1"
+log = "0.4.*"
