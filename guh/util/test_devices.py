@@ -104,7 +104,10 @@ class FakeUSBMSCDevice(Elaboratable):
     READY polling.
 
     Backed by real storage: block `lba` is initialized so byte `i` holds
-    (i ^ lba) & 0xFF, so READ_10 serves the same pattern as before.
+    (i ^ lba) & 0xFF; READ_10 serves from storage and WRITE_10 stores into it,
+    so written data reads back. The WRITE_10 drain path is deliberately
+    throttled so the OUT endpoint NAKs some packets, exercising the host's
+    retransmission path.
 
     TODO: worth splitting out CBW wrapping into a subcomponent so we could
     use this in a real MSC device? I don't think LUNA has an example of
@@ -307,6 +310,12 @@ class FakeUSBMSCDevice(Elaboratable):
                             with m.Else():
                                 m.d.usb += csw_fail.eq(1)
                                 m.next = "SEND-CSW"
+                        with m.Case(SCSIOpCode.WRITE_10):
+                            with m.If(device_ready):
+                                m.next = "RECV-DATA"
+                            with m.Else():
+                                m.d.usb += csw_fail.eq(1)
+                                m.next = "SEND-CSW"
                         with m.Default():
                             m.next = "SEND-CSW"
 
@@ -334,6 +343,22 @@ class FakeUSBMSCDevice(Elaboratable):
                 with m.If(stream_in.stream.ready):
                     m.d.usb += tx_byte_idx.eq(tx_byte_idx + 1)
                     with m.If(is_last_byte):
+                        m.d.usb += tx_byte_idx.eq(0)
+                        m.next = "SEND-CSW"
+
+            with m.State("RECV-DATA"):
+                # Drain slower than HS line rate so the OUT endpoint's buffer
+                # backs up and it NAKs packets - exercises host retransmission.
+                throttle = Signal(2)
+                m.d.usb += throttle.eq(throttle + 1)
+                m.d.comb += stream_out.stream.ready.eq(throttle == 0)
+                with m.If(stream_out.stream.valid & stream_out.stream.ready):
+                    m.d.comb += [
+                        storage_w_data.eq(stream_out.stream.payload),
+                        storage_w_en.eq(1),
+                    ]
+                    m.d.usb += tx_byte_idx.eq(tx_byte_idx + 1)
+                    with m.If(tx_byte_idx == (xfer_total_bytes - 1)):
                         m.d.usb += tx_byte_idx.eq(0)
                         m.next = "SEND-CSW"
 
