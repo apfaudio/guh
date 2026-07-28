@@ -6,6 +6,8 @@
 
 pub mod usb_msc;
 pub mod partition;
+#[cfg(feature = "fatfs")]
+pub mod usb_msc_fatfs;
 
 pub use guh_dma::DmaBuf;
 

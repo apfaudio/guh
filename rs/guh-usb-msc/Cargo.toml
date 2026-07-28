@@ -13,3 +13,9 @@ bench = false
 guh-dma = { path = "../guh-dma" }
 critical-section = "1"
 log = "0.4.*"
+fatfs = { git = "https://github.com/vk2seb/rust-fatfs.git", branch = "seb/dma-geo", default-features = false, optional = true }
+
+[features]
+default = []
+# fatfs block-device adapter over the UsbMsc trait (mount/dir-scan slow path).
+fatfs = ["dep:fatfs"]
