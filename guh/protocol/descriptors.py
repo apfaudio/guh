@@ -111,3 +111,9 @@ class EndpointAddress(data.Struct):
 class EndpointAttributes(data.Struct):
     transfer_type: EndpointTransferType  # Transfer type (bits 1:0)
     _reserved:     unsigned(6)           # Reserved (bits 7:2)
+
+
+class EndpointMaxPacketSize(data.Struct):
+    size:       unsigned(11)             # Max packet size, bytes (bits 10:0)
+    additional: unsigned(2)              # Additional transactions (bits 12:11)
+    _reserved:  unsigned(3)              # Reserved (bits 15:13)

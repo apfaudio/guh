@@ -51,11 +51,19 @@ class USBDescriptorParser(wiring.Component):
 
         # Build output signature based on endpoint_filter
         if endpoint_filter == EndpointFilter.IN:
-            o_layout = {"i_endp": EndpointAddress, "valid": unsigned(1)}
+            o_layout = {"i_endp": EndpointAddress,
+                        "i_endp_mps": EndpointMaxPacketSize,
+                        "valid": unsigned(1)}
         elif endpoint_filter == EndpointFilter.OUT:
-            o_layout = {"o_endp": EndpointAddress, "valid": unsigned(1)}
+            o_layout = {"o_endp": EndpointAddress,
+                        "o_endp_mps": EndpointMaxPacketSize,
+                        "valid": unsigned(1)}
         else:  # IN_AND_OUT
-            o_layout = {"i_endp": EndpointAddress, "o_endp": EndpointAddress, "valid": unsigned(1)}
+            o_layout = {"i_endp": EndpointAddress,
+                        "i_endp_mps": EndpointMaxPacketSize,
+                        "o_endp": EndpointAddress,
+                        "o_endp_mps": EndpointMaxPacketSize,
+                        "valid": unsigned(1)}
 
         self._o_signature = Out(data.StructLayout(o_layout))
         super().__init__({"enable": In(unsigned(1)),
@@ -80,6 +88,7 @@ class USBDescriptorParser(wiring.Component):
         # Endpoint descriptor fields (temporary during parsing)
         endp_addr = Signal(EndpointAddress)
         endp_attr = Signal(EndpointAttributes)
+        endp_mps  = Signal(EndpointMaxPacketSize)
 
         # Tracking which endpoints have been found
         want_in = self._endpoint_filter in (EndpointFilter.IN, EndpointFilter.IN_AND_OUT)
@@ -113,8 +122,17 @@ class USBDescriptorParser(wiring.Component):
                         with m.Case(2):
                             with m.If(desc_type == DescriptorType.ENDPOINT):
                                 m.d.usb += endp_attr.eq(self.i.payload)
+                        # Endpoint descriptor: byte 4 = wMaxPacketSize LSB
+                        with m.Case(3):
+                            with m.If(desc_type == DescriptorType.ENDPOINT):
+                                m.d.usb += endp_mps.as_value() \
+                                    .word_select(0, 8).eq(self.i.payload)
+                        # Endpoint descriptor: byte 5 = wMaxPacketSize MSB
                         # Interface descriptor: byte 5 = bInterfaceClass
                         with m.Case(4):
+                            with m.If(desc_type == DescriptorType.ENDPOINT):
+                                m.d.usb += endp_mps.as_value() \
+                                    .word_select(1, 8).eq(self.i.payload)
                             with m.If(desc_type == DescriptorType.INTERFACE):
                                 m.d.usb += iface_class.eq(self.i.payload)
                         # Interface descriptor: byte 6 = bInterfaceSubClass
@@ -160,6 +178,7 @@ class USBDescriptorParser(wiring.Component):
                         with m.Elif((desc_type == DescriptorType.ENDPOINT)):
                             m.d.usb += Print('\t bEndpointAddress = ', endp_addr)
                             m.d.usb += Print('\t bmAttributes = ', endp_attr)
+                            m.d.usb += Print('\t wMaxPacketSize = ', endp_mps.size)
                             with m.If(in_matching_interface):
                                 type_match = endp_attr.transfer_type == self._transfer_type
                                 is_in = endp_addr.direction == EndpointDirection.IN
@@ -170,6 +189,7 @@ class USBDescriptorParser(wiring.Component):
                                         m.d.comb += capturing_in.eq(1)
                                         m.d.usb += [
                                             self.o.i_endp.eq(endp_addr),
+                                            self.o.i_endp_mps.eq(endp_mps),
                                             found_in.eq(1),
                                             Print('\t **** EXTRACTED IN ****')
                                         ]
@@ -180,6 +200,7 @@ class USBDescriptorParser(wiring.Component):
                                         m.d.comb += capturing_out.eq(1)
                                         m.d.usb += [
                                             self.o.o_endp.eq(endp_addr),
+                                            self.o.o_endp_mps.eq(endp_mps),
                                             found_out.eq(1),
                                             Print('\t **** EXTRACTED OUT ****')
                                         ]
