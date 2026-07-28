@@ -24,6 +24,16 @@ readme = "README.md"
 license = {text = "BSD"}
 
 
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+# Only ship the `guh` python package: the flat repo layout has other
+# top-level dirs (rs/, examples/, ...) that setuptools' auto-discovery
+# would otherwise refuse to disambiguate.
+[tool.setuptools.packages.find]
+include = ["guh*"]
+
 [tool.pdm.dev-dependencies]
 test = [
     "pytest",

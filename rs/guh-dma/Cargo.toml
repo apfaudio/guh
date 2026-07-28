@@ -1,0 +1,10 @@
+[package]
+name = "guh-dma"
+version = "0.0.0"
+edition = "2021"
+categories = ["embedded", "hardware-support", "no-std"]
+description = "Pinned DMA-target buffers in PSRAM (DmaBuf)."
+
+[lib]
+test = true
+bench = false

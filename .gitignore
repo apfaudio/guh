@@ -9,3 +9,8 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .pdm-python
+
+# Rust
+target/
+*.rs.bk
+Cargo.lock
