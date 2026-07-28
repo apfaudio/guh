@@ -16,6 +16,7 @@ A lot of this comes from the various sources linked at:
 from amaranth import *
 from amaranth.lib import data, enum, fifo, stream, wiring
 from amaranth.lib.cdc import ResetInserter
+from amaranth.lib import memory
 from amaranth.lib.wiring import In, Out
 
 from luna.gateware.stream.future import Packet
@@ -112,14 +113,22 @@ class SCSIBulkHost(wiring.Component):
     SCSI command wrapper transport engine (bulk-only BBB).
     Issues CBWs, parses CSWs (protocol which encapsulates the actual commands)
     On read ops, data is streamed out rx_data.
+    On write ops (cmd.dir_out), data is streamed in from tx_data; exactly
+    cmd.data_len bytes are consumed on success. On failure, some prefix of
+    the data may have been consumed - the caller must flush its data source.
 
     TODO: drop non-streaming mode and punt this to higher layers.
     TODO: handle more error conditions.
     """
 
+    # HS bulk packets are up to 512 bytes. Both the internal rx FIFO and the
+    # SIE tx FIFO must be able to hold a whole packet.
+    MAX_BULK_PACKET_BYTES = 512
+
     class Command(data.Struct):
         start:       unsigned(1)
         data_len:    unsigned(32)
+        dir_out:     unsigned(1) # 1=data phase is host-to-device (from tx_data)
         stream_data: unsigned(1) # 0=capture to self.captured, 1=stream to rx_data
                                  # TODO: probably cleaner to drop self.captured...
         cdb:         data.UnionLayout({
@@ -136,12 +145,15 @@ class SCSIBulkHost(wiring.Component):
     cmd:      In(Command)
     status:   Out(Status)
     rx_data:  Out(stream.Signature(Packet(unsigned(8))))
+    tx_data:  In(stream.Signature(unsigned(8)))
     captured: Out(ReadCapacity10Response)
 
     def __init__(self, **kwargs):
         self.enumerator = USBHostEnumerator(
             **kwargs,
             config_number=1,
+            # The SIE tx FIFO must hold a whole preloaded bulk OUT packet.
+            fifo_depth=self.MAX_BULK_PACKET_BYTES,
             parser=USBDescriptorParser(
                 endpoint_filter=EndpointFilter.IN_AND_OUT,
                 transfer_type=EndpointTransferType.BULK,
@@ -158,11 +170,10 @@ class SCSIBulkHost(wiring.Component):
         m.submodules.enumerator = enum = self.enumerator
         packet_layout = Packet(unsigned(8))
 
-        # HS bulk packets are up to 512 bytes; the rx FIFO must always be able
-        # to absorb a whole packet (see DATA state).
-        MAX_BULK_PACKET_BYTES = 512
+        # The rx FIFO must always be able to absorb a whole packet
+        # (see DATA state).
         RX_FIFO_DEPTH = 600
-        assert RX_FIFO_DEPTH >= MAX_BULK_PACKET_BYTES
+        assert RX_FIFO_DEPTH >= self.MAX_BULK_PACKET_BYTES
         m.submodules.rx_fifo = rx_fifo = DomainRenamer("usb")(fifo.SyncFIFOBuffered(
             width=packet_layout.size, depth=RX_FIFO_DEPTH))
         wiring.connect(m, rx_fifo.r_stream, wiring.flipped(self.rx_data))
@@ -186,6 +197,19 @@ class SCSIBulkHost(wiring.Component):
 
         rx_packet = packet_layout(rx_fifo.w_stream.payload)
         stream_mode = Signal()
+        dir_out = Signal()
+
+        # OUT packets are chunked by the OUT endpoint's wMaxPacketSize and
+        # mirrored into a replay buffer, since the SIE drains its tx FIFO
+        # after every transaction, successful or not.
+        mps_out = enum.parser.o.o_endp_mps.size
+        tx_sent = Signal(32)
+        pkt_len = Signal(range(self.MAX_BULK_PACKET_BYTES + 1))
+        out_idx = Signal(range(self.MAX_BULK_PACKET_BYTES + 1))
+        m.submodules.replay_mem = replay_mem = memory.Memory(
+            shape=unsigned(8), depth=self.MAX_BULK_PACKET_BYTES, init=[])
+        replay_wr = replay_mem.write_port(domain="usb")
+        replay_rd = replay_mem.read_port(domain="usb")
 
         # Build CBW from command
         cbw_sig = Signal(CBW)
@@ -199,7 +223,8 @@ class SCSIBulkHost(wiring.Component):
             cbw_sig.dCBWSignature.eq(CBW_SIGNATURE),
             cbw_sig.dCBWTag.eq(cbw_tag),
             cbw_sig.dCBWDataTransferLength.eq(self.cmd.data_len),
-            cbw_sig.bmCBWFlags.eq(Mux(self.cmd.data_len > 0, CBWFlags.DATA_IN, CBWFlags.DATA_OUT)),
+            cbw_sig.bmCBWFlags.eq(Mux((self.cmd.data_len > 0) & ~self.cmd.dir_out,
+                                      CBWFlags.DATA_IN, CBWFlags.DATA_OUT)),
             cbw_sig.bCBWCBLength.eq(cdb_len),
             cbw_sig.CBWCB.eq(self.cmd.cdb),
         ]
@@ -241,6 +266,7 @@ class SCSIBulkHost(wiring.Component):
                         tx_byte_idx.eq(0),
                         data_len.eq(self.cmd.data_len),
                         stream_mode.eq(self.cmd.stream_data),
+                        dir_out.eq(self.cmd.dir_out),
                     ]
                     m.next = "CBW-LOAD"
 
@@ -269,10 +295,18 @@ class SCSIBulkHost(wiring.Component):
                                 rx_byte_idx.eq(0),
                                 rx_data_count.eq(0),
                             ]
-                            with m.If(data_len > 0):
-                                m.next = "DATA"
-                            with m.Else():
+                            with m.If(data_len == 0):
                                 m.next = "CSW"
+                            with m.Elif(dir_out):
+                                m.d.usb += [
+                                    tx_sent.eq(0),
+                                    out_idx.eq(0),
+                                    pkt_len.eq(Mux(data_len > mps_out,
+                                                   mps_out, data_len)),
+                                ]
+                                m.next = "DATA-OUT-LOAD"
+                            with m.Else():
+                                m.next = "DATA"
                         with m.Default():
                             m.d.comb += [
                                 self.status.done.eq(1),
@@ -287,7 +321,7 @@ class SCSIBulkHost(wiring.Component):
                 # backpressure. (Captured non-stream reads bypass the FIFO.)
                 rx_has_room = Signal()
                 m.d.comb += rx_has_room.eq(
-                    (rx_fifo.depth - rx_fifo.level) >= MAX_BULK_PACKET_BYTES)
+                    (rx_fifo.depth - rx_fifo.level) >= self.MAX_BULK_PACKET_BYTES)
                 with m.If(enum.ctrl.status.idle & (rx_has_room | ~stream_mode)):
                     m.d.comb += start_bulk_in(endp_in)
                     m.next = "DATA-RX"
@@ -323,6 +357,70 @@ class SCSIBulkHost(wiring.Component):
                                 m.next = "DATA"
                         with m.Case(TransferResponse.NAK):
                             m.next = "DATA"
+
+            with m.State("DATA-OUT-LOAD"):
+                m.d.comb += [
+                    enum.ctrl.txs.valid.eq(self.tx_data.valid),
+                    enum.ctrl.txs.payload.eq(self.tx_data.payload),
+                    self.tx_data.ready.eq(enum.ctrl.txs.ready),
+                    replay_wr.addr.eq(out_idx),
+                    replay_wr.data.eq(self.tx_data.payload),
+                    replay_wr.en.eq(self.tx_data.valid & enum.ctrl.txs.ready),
+                ]
+                with m.If(self.tx_data.valid & enum.ctrl.txs.ready):
+                    m.d.usb += out_idx.eq(out_idx + 1)
+                    with m.If(out_idx == pkt_len - 1):
+                        m.d.usb += out_idx.eq(0)
+                        m.next = "DATA-OUT-XFER"
+
+            with m.State("DATA-OUT-XFER"):
+                with m.If(enum.ctrl.status.idle):
+                    m.d.comb += start_bulk_out(endp_out)
+                    m.next = "DATA-OUT-WAIT"
+
+            with m.State("DATA-OUT-WAIT"):
+                sent_next = tx_sent + pkt_len
+                remaining_next = data_len - sent_next
+                with m.If(enum.ctrl.status.idle):
+                    with m.Switch(enum.ctrl.status.response):
+                        with m.Case(TransferResponse.ACK):
+                            m.d.usb += [
+                                pid_out.eq(Mux(pid_out, DataPID.DATA0, DataPID.DATA1)),
+                                tx_sent.eq(sent_next),
+                            ]
+                            with m.If(sent_next >= data_len):
+                                m.d.usb += rx_byte_idx.eq(0)
+                                m.next = "CSW"
+                            with m.Else():
+                                m.d.usb += pkt_len.eq(Mux(remaining_next > mps_out,
+                                                          mps_out, remaining_next))
+                                m.next = "DATA-OUT-LOAD"
+                        with m.Case(TransferResponse.STALL):
+                            m.d.comb += [
+                                self.status.done.eq(1),
+                                self.status.rejected.eq(1),
+                            ]
+                            m.next = "IDLE"
+                        with m.Default():
+                            # NAK/TIMEOUT/etc: retransmit same packet, same PID.
+                            # Unbounded - devices NAK for ages while committing
+                            # to flash; the engine watchdog is the backstop.
+                            m.next = "DATA-OUT-REFILL"
+
+            with m.State("DATA-OUT-REFILL"):
+                # The SIE drained its tx FIFO before reporting idle and its
+                # depth >= max packet, so txs.ready is guaranteed high here.
+                # Sync read port: data lags addr by one cycle.
+                m.d.comb += replay_rd.addr.eq(out_idx)
+                m.d.usb += out_idx.eq(out_idx + 1)
+                with m.If(out_idx != 0):
+                    m.d.comb += [
+                        enum.ctrl.txs.valid.eq(1),
+                        enum.ctrl.txs.payload.eq(replay_rd.data),
+                    ]
+                with m.If(out_idx == pkt_len):
+                    m.d.usb += out_idx.eq(0)
+                    m.next = "DATA-OUT-XFER"
 
             with m.State("CSW"):
                 with m.If(enum.ctrl.status.idle):
