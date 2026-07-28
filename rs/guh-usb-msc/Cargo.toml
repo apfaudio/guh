@@ -17,5 +17,6 @@ fatfs = { git = "https://github.com/vk2seb/rust-fatfs.git", branch = "seb/dma-ge
 
 [features]
 default = []
-# fatfs block-device adapter over the UsbMsc trait (mount/dir-scan slow path).
+# fatfs block-device adapter over the UsbMsc trait (mount/dir-scan slow path)
+# and the FAT chain-following ring streamer (hot path).
 fatfs = ["dep:fatfs"]
