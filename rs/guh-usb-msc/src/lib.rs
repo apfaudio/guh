@@ -5,6 +5,7 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod usb_msc;
+pub mod partition;
 
 pub use guh_dma::DmaBuf;
 
