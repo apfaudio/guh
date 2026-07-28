@@ -467,7 +467,8 @@ class USBSIE(wiring.Component):
         send_sofs = Signal()
         rx_len = Signal(8)
         response = Signal(TransferResponse)
-        tx_len = Signal(8)  # Captured from TX FIFO level at transfer start
+        # Captured from TX FIFO level at transfer start
+        tx_len = Signal(range(self.fifo_depth + 1))
         tx_byte_count = Signal(16)
 
         # SIE token stream for multiplexing with SOF. SOF has priority when SIE is idle

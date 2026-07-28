@@ -61,15 +61,16 @@ class USBHostEnumerator(wiring.Component):
     ctrl: Out(USBSIEInterface())
 
     def __init__(self, *, bus=None, handle_clocking=True,
-                 device_address=0x12, config_number=1, parser):
+                 device_address=0x12, config_number=1, parser, fifo_depth=64):
         self._device_address = device_address
         self._config_number = config_number
 
         # Descriptor parser (streamed config descriptor stream at correct stage internally)
         self.parser = parser
 
-        # Create USB transfer engine
-        self.sie = USBSIE(bus=bus, handle_clocking=handle_clocking)
+        # Engines sending large bulk OUT packets must size fifo_depth to hold
+        # a whole packet (up to 512 bytes at HS).
+        self.sie = USBSIE(bus=bus, handle_clocking=handle_clocking, fifo_depth=fifo_depth)
 
         super().__init__()
 
