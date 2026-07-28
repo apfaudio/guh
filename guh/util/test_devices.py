@@ -6,7 +6,8 @@ Fake USB devices for integration testing.
 """
 
 from amaranth import *
-from amaranth.lib import memory
+from amaranth.lib import memory, wiring
+from amaranth.lib.wiring import In, Out
 
 from luna.gateware.interface.utmi import UTMIInterface
 from luna.gateware.usb.usb2.control import USBControlEndpoint
@@ -94,6 +95,23 @@ class FakeUSBMIDIDevice(Elaboratable):
         return m
 
 
+class FakeMassStorageSimulationInterface(wiring.Signature):
+    """
+    Byte-wide port to a host-side model of a fake device's backing store.
+
+    Directions are from the *device's* point of view. The read side is
+    combinational, so the model must present ``r_data`` for the current
+    ``addr`` before every ``eval()``, like a comb-read memory.
+    """
+    def __init__(self):
+        super().__init__({
+            "addr":    Out(unsigned(32)),
+            "r_data":   In(unsigned(8)),
+            "w_data":  Out(unsigned(8)),
+            "w_en":    Out(unsigned(1)),
+        })
+
+
 class FakeUSBMSCDevice(Elaboratable):
     """
     Simple USB Mass Storage device for integration testing.
@@ -109,6 +127,9 @@ class FakeUSBMSCDevice(Elaboratable):
     throttled so the OUT endpoint NAKs some packets, exercising the host's
     retransmission path.
 
+    With `external_storage=True` the internal memory is replaced by `simif`, a
+    :class:`FakeMassStorageSimulationInterface` which the caller must service.
+
     TODO: worth splitting out CBW wrapping into a subcomponent so we could
     use this in a real MSC device? I don't think LUNA has an example of
     this so maybe an MSC device could be worth upstreaming...
@@ -118,12 +139,15 @@ class FakeUSBMSCDevice(Elaboratable):
     BLOCK_COUNT = 1024  # 512KB total
 
     def __init__(self, max_packet_size=64, full_speed_only=False,
-                 block_count=None):
+                 block_count=None, external_storage=False):
         self.ep0_max_packet_size = min(max_packet_size, 64)  # EP0 caps at 64
         self.bulk_max_packet_size = max_packet_size
         self.full_speed_only = full_speed_only
         self.block_count = self.BLOCK_COUNT if block_count is None else block_count
+        self.external_storage = external_storage
         self.utmi = UTMIInterface()
+        if external_storage:
+            self.simif = FakeMassStorageSimulationInterface().create()
         super().__init__()
 
     def create_descriptors(self):
@@ -236,7 +260,9 @@ class FakeUSBMSCDevice(Elaboratable):
         csw_flat = csw.as_value()
 
         # ================================================================
-        # Backing storage (simulation-only: the comb read port implies LUTRAM)
+        # Backing storage. Either an internal memory (simulation-only: the
+        # comb read port implies LUTRAM) or `simif`, an external byte port the
+        # caller services.
         # ================================================================
 
         # Byte cursor within the data phase (also reused for capacity/CSW).
@@ -248,19 +274,27 @@ class FakeUSBMSCDevice(Elaboratable):
         storage_w_en   = Signal()
         m.d.comb += storage_addr.eq(cbw_lba * self.BLOCK_SIZE + tx_byte_idx)
 
-        m.submodules.storage = storage = memory.Memory(
-            shape=unsigned(8), depth=self.BLOCK_SIZE * self.block_count,
-            init=(((i % self.BLOCK_SIZE) ^ (i // self.BLOCK_SIZE)) & 0xFF
-                  for i in range(self.BLOCK_SIZE * self.block_count)))
-        storage_rd = storage.read_port(domain="comb")
-        storage_wr = storage.write_port(domain="usb")
-        m.d.comb += [
-            storage_rd.addr.eq(storage_addr),
-            storage_r_data.eq(storage_rd.data),
-            storage_wr.addr.eq(storage_addr),
-            storage_wr.data.eq(storage_w_data),
-            storage_wr.en.eq(storage_w_en),
-        ]
+        if self.external_storage:
+            m.d.comb += [
+                self.simif.addr.eq(storage_addr),
+                storage_r_data.eq(self.simif.r_data),
+                self.simif.w_data.eq(storage_w_data),
+                self.simif.w_en.eq(storage_w_en),
+            ]
+        else:
+            m.submodules.storage = storage = memory.Memory(
+                shape=unsigned(8), depth=self.BLOCK_SIZE * self.block_count,
+                init=(((i % self.BLOCK_SIZE) ^ (i // self.BLOCK_SIZE)) & 0xFF
+                      for i in range(self.BLOCK_SIZE * self.block_count)))
+            storage_rd = storage.read_port(domain="comb")
+            storage_wr = storage.write_port(domain="usb")
+            m.d.comb += [
+                storage_rd.addr.eq(storage_addr),
+                storage_r_data.eq(storage_rd.data),
+                storage_wr.addr.eq(storage_addr),
+                storage_wr.data.eq(storage_w_data),
+                storage_wr.en.eq(storage_w_en),
+            ]
 
         # ================================================================
         # Response state machine
