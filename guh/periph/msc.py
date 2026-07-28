@@ -15,38 +15,16 @@ from amaranth.lib import data, fifo, stream, wiring
 from amaranth.lib.wiring import In, Out
 from amaranth_soc import csr, wishbone
 
-from luna.gateware.stream.future import Packet
-
 from guh.engines.msc import USBMSCHost, MAX_BLOCKS_PER_XFER
+from guh.periph.dma import DMAEngine
+from guh.util.gearbox import Pack, Unframe
 
 
-class Pack8to32(wiring.Component):
-
-    """
-    Take an LUNA USB packet stream and pack it into 32-bit words,
-    where the outgoing byte position is reset on every packet.
-    """
-
-    i: In(stream.Signature(Packet(unsigned(8))))
-    o: Out(stream.Signature(unsigned(32)))
-
-    def elaborate(self, platform):
-        m = Module()
-        lane  = Signal(2)
-        accum = Signal(24)
-        cur   = Mux(self.i.payload.first, 0, lane)
-        emit  = cur == 3
-        byte  = self.i.payload.data
-        m.d.comb += [
-            self.o.payload.eq(Cat(accum, byte)),
-            self.o.valid.eq(self.i.valid & emit),
-            self.i.ready.eq(Mux(emit, self.o.ready, 1)),
-        ]
-        with m.If(self.i.valid & self.i.ready):
-            m.d.sync += lane.eq(cur + 1)
-            with m.If(~emit):
-                m.d.sync += accum.word_select(cur, 8).eq(byte)
-        return m
+# Block size is fixed rather than read from host.status.block_size: making it
+# dynamic costs a fair bit of logic and every thumbdrive in existence uses
+# 512-byte blocks, so this is 'dirty but works'.
+_WORDS_PER_BLOCK   = USBMSCHost._DEFAULT_BLOCK_SIZE_BYTES // 4
+MAX_TRANSFER_WORDS = _WORDS_PER_BLOCK * MAX_BLOCKS_PER_XFER   # per-command word cap
 
 
 class Peripheral(wiring.Component):
@@ -139,14 +117,14 @@ class Peripheral(wiring.Component):
     # Constants
     #
 
-    # TODO: blocksize should really come dynamically from the host status.block_size,
-    # but making it dynamic increases resource usage of this core a fair bit, and is kind of
-    # overkill given every single thumbdrive in existence will use block_size=512. So here
-    # we are just inheriting the default block size for something 'dirty but works'.
-    _BLOCK_SIZE_BYTES = USBMSCHost._DEFAULT_BLOCK_SIZE_BYTES
-    _WORDS_PER_BLOCK  = _BLOCK_SIZE_BYTES // 4
+    # PSRAM/DMA data path width. The rest of this core assumes 32-bit words;
+    # the DMAEngine and the (un)packers are width-generic, so they take this
+    # explicitly.
+    _DMA_DATA_WIDTH   = 32
 
-    # Length of each DMA write burst. 8 words = 32 bytes per burst.
+    # Length of each DMA burst. 8 words = 32 bytes per burst. Must divide
+    # _WORDS_PER_BLOCK so a per-command word count is always a whole number of
+    # bursts (the DMAEngine only issues whole bursts).
     _DMA_BURST_LEN    = 8
 
     # 8KiB = size of FIFO between USB and PSRAM DMA engines.
@@ -154,10 +132,14 @@ class Peripheral(wiring.Component):
     # design which is hammering PSRAM at the same time as this core.
     _DATA_FIFO_WORDS  = 8192 // 4
 
-    def __init__(self, *, fifo_depth=8, addr_width=22, device_address=0x12):
+    def __init__(self, *, fifo_depth=8, addr_width=22, device_address=0x12,
+                 msc_host=None):
         self.fifo_depth = fifo_depth
         self.addr_width = addr_width
         self.device_address = device_address
+        # Test seam: inject a pre-built USBMSCHost (e.g. bus=None for sim, so
+        # the testbench can reach its UTMI interface).
+        self._msc_host = msc_host
 
         regs = csr.Builder(addr_width=6, data_width=8)
         self._status     = regs.add("status",     self.StatusReg(),    offset=0x00)
@@ -192,11 +174,15 @@ class Peripheral(wiring.Component):
         # Submodules
         #
 
-        m.submodules.msc_host = msc_host = USBMSCHost(
-            bus=ulpi_bus,
-            handle_clocking=True,
-            device_address=self.device_address,
-        )
+        if self._msc_host is not None:
+            msc_host = self._msc_host
+        else:
+            msc_host = USBMSCHost(
+                bus=ulpi_bus,
+                handle_clocking=True,
+                device_address=self.device_address,
+            )
+        m.submodules.msc_host = msc_host
         m.submodules.bridge = self._bridge
         m.submodules.cmd_fifo = cmd_fifo = fifo.SyncFIFOBuffered(
             width=self.DMACommand.as_shape().size, depth=self.fifo_depth)
@@ -237,39 +223,31 @@ class Peripheral(wiring.Component):
         ]
 
         #
-        # Request / DMA engines: 2 parallel FSMs - one for SCSI, one for DMA
+        # Request / DMA: a SCSI/command FSM here, plus the DMAEngine submodule
+        # (transfer FIFO + Wishbone master). Only the byte<->word packing lives
+        # up here, on the host side of the engine's word streams.
         #
 
-        #
-        # Shared state between both FSMs
-        #
+        # The engine's transfer FIFO is sized here to double as the large
+        # USB<->PSRAM slack buffer.
+        m.submodules.dma = dma = DMAEngine(
+            addr_width=self.addr_width, burst_len=self._DMA_BURST_LEN,
+            max_words=MAX_TRANSFER_WORDS,
+            stage_words=self._DATA_FIFO_WORDS, data_width=self._DMA_DATA_WIDTH)
+        wiring.connect(m, wiring.flipped(self.dma_bus), dma.bus)
 
-        MAX_TOTAL_WORDS = self._WORDS_PER_BLOCK * MAX_BLOCKS_PER_XFER
-
-        # In-flight command
-        current_cmd  = Signal(self.DMACommand)
-        # Write cursor
-        dma_word_idx = Signal(range(MAX_TOTAL_WORDS + 1))
-        # (desired) word count of the in-flight command and DMA-complete flag
-        total_words = Signal(range(MAX_TOTAL_WORDS + 1))
-        dma_done    = Signal()
-        m.d.comb += [
-            total_words.eq((current_cmd.blocks_m1 + 1) * self._WORDS_PER_BLOCK),
-            dma_done.eq(dma_word_idx == total_words),
-        ]
-        # Cross-FSM handshake: dma fsm only starts bursts while cmd fsm is in
-        # RUN, and cmd fsm only dequeues (and flushes the FIFO) while dma fsm
-        # is idle (so a flush can never yank data out from under a burst).
-        cmd_running = Signal()
-        dma_idle    = Signal()
-
-        # FIFO for slack between incoming USB data and outgoing PSRAM writes.
-        fifo_flush = Signal()
-        m.submodules.data_fifo = data_fifo = ResetInserter(fifo_flush)(
-            fifo.SyncFIFOBuffered(width=32, depth=self._DATA_FIFO_WORDS))
-        m.submodules.pack = pack = Pack8to32()
-        wiring.connect(m, msc_host.rx_data, pack.i)
-        wiring.connect(m, pack.o, data_fifo.w_stream)
+        # `flush` restarts pack's byte lanes on command hand-off/abort and on
+        # each rx packet's last byte, so a mis-sized packet can't misalign the
+        # rest (sync reset: lands where the next packet begins).
+        data_flush = Signal()   # command hand-off / abort
+        flush      = Signal()   # packer byte-lane reset
+        m.submodules.unframe = unframe = Unframe(unsigned(8))
+        m.submodules.pack    = pack    = ResetInserter(flush)(
+            Pack(self._DMA_DATA_WIDTH))
+        wiring.connect(m, msc_host.rx_data, unframe.i)
+        wiring.connect(m, unframe.o, pack.i)
+        m.d.comb += flush.eq(data_flush | unframe.last)
+        wiring.connect(m, pack.o, dma.rx)
 
         #
         # SCSI/CMD FSM: RUN holds until both the bulk transfer and DMA drain
@@ -291,69 +269,40 @@ class Peripheral(wiring.Component):
         with m.FSM(name="cmd"):
 
             with m.State("IDLE"):
-                with m.If(cmd_fifo.r_rdy & msc_host.status.ready & dma_idle):
+                # `dma.cmd.ready` is high only when the engine has no command
+                # in flight, so we only dequeue once the previous transfer has
+                # fully completed or been aborted below.
+                with m.If(cmd_fifo.r_rdy & msc_host.status.ready & dma.cmd.ready):
                     m.d.comb += [
                         cmd_fifo.r_en.eq(1),
-                        fifo_flush.eq(1),
+                        data_flush.eq(1),
                         msc_host.cmd.lba.eq(fifo_cmd.lba),
                         msc_host.cmd.block_count.eq(fifo_cmd.blocks_m1),
                         msc_host.cmd.start.eq(1),
+                        dma.cmd.valid.eq(1),
+                        dma.cmd.payload.addr.eq(fifo_cmd.addr_w),
+                        # block -> word translation lives here, not in the engine.
+                        dma.cmd.payload.words.eq(
+                            (fifo_cmd.blocks_m1 + 1) * _WORDS_PER_BLOCK),
                     ]
                     m.d.sync += [
-                        current_cmd.eq(cmd_fifo.r_data),
-                        dma_word_idx.eq(0),
                         transfer_done.eq(0),
                         transfer_error.eq(0),
                     ]
                     m.next = "RUN"
 
             with m.State("RUN"):
-                m.d.comb += cmd_running.eq(1)
-                with m.If(transfer_done & (transfer_error | dma_done)):
+                with m.If(transfer_done & (transfer_error | dma.done)):
+                    # On error the DMA may still be in flight; abort it so the
+                    # engine flushes and frees up for the next command. A clean
+                    # completion self-retires.
+                    with m.If(transfer_error):
+                        m.d.comb += [dma.abort.eq(1), data_flush.eq(1)]
                     m.d.sync += [
                         cmds_done.eq(cmds_done + 1),
                         errors.eq(errors + transfer_error),
                         error_flag.eq(transfer_error),
                     ]
                     m.next = "IDLE"
-
-
-        #
-        # DMA FSM: Burst to PSRAM whenever >DMA_BURST_LEN words are buffered.
-        #
-
-        burst_idx = Signal(range(self._DMA_BURST_LEN))
-        m.d.comb += [
-            self.dma_bus.we.eq(1),
-            self.dma_bus.sel.eq(0xF),
-        ]
-
-        with m.FSM(name="dma"):
-
-            with m.State("IDLE"):
-                m.d.comb += dma_idle.eq(1)
-                with m.If(cmd_running & ~dma_done &
-                          (data_fifo.level >= self._DMA_BURST_LEN)):
-                    m.d.sync += burst_idx.eq(0)
-                    m.next = "BURST"
-
-            with m.State("BURST"):
-                last_beat = burst_idx == (self._DMA_BURST_LEN - 1)
-                m.d.comb += [
-                    self.dma_bus.cyc.eq(1),
-                    self.dma_bus.stb.eq(1),
-                    self.dma_bus.adr.eq(current_cmd.addr_w + dma_word_idx),
-                    self.dma_bus.dat_w.eq(data_fifo.r_data),
-                    self.dma_bus.cti.eq(Mux(last_beat, wishbone.CycleType.END_OF_BURST,
-                                                       wishbone.CycleType.INCR_BURST)),
-                    data_fifo.r_en.eq(self.dma_bus.ack),
-                ]
-                with m.If(self.dma_bus.ack):
-                    m.d.sync += [
-                        dma_word_idx.eq(dma_word_idx + 1),
-                        burst_idx.eq(burst_idx + 1),
-                    ]
-                    with m.If(last_beat):
-                        m.next = "IDLE"
 
         return m
