@@ -632,6 +632,12 @@ class USBSIE(wiring.Component):
                 with m.If(handshake_detector.detected.ack):
                     m.d.usb += response.eq(TransferResponse.ACK)
                     m.next = "IPD_DRAIN_TX"
+                # NYET means "accepted, but no room for another packet" (USB 2.0 8.5.1).
+                # No PING support, so report ACK and let the next OUT eat a NAK if still busy.
+                # TODO: PING support.
+                with m.If(handshake_detector.detected.nyet):
+                    m.d.usb += response.eq(TransferResponse.ACK)
+                    m.next = "IPD_DRAIN_TX"
                 with m.If(handshake_detector.detected.nak):
                     m.d.usb += response.eq(TransferResponse.NAK)
                     m.next = "IPD_DRAIN_TX"
