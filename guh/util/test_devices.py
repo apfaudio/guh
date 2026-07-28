@@ -6,6 +6,7 @@ Fake USB devices for integration testing.
 """
 
 from amaranth import *
+from amaranth.lib import memory
 
 from luna.gateware.interface.utmi import UTMIInterface
 from luna.gateware.usb.usb2.control import USBControlEndpoint
@@ -102,8 +103,8 @@ class FakeUSBMSCDevice(Elaboratable):
     do something like this. Rejects commands until we returned success on the
     READY polling.
 
-    Emits data which is the requested block address XOR'd with the byte
-    index within the block.
+    Backed by real storage: block `lba` is initialized so byte `i` holds
+    (i ^ lba) & 0xFF, so READ_10 serves the same pattern as before.
 
     TODO: worth splitting out CBW wrapping into a subcomponent so we could
     use this in a real MSC device? I don't think LUNA has an example of
@@ -113,10 +114,12 @@ class FakeUSBMSCDevice(Elaboratable):
     BLOCK_SIZE = 512
     BLOCK_COUNT = 1024  # 512KB total
 
-    def __init__(self, max_packet_size=64, full_speed_only=False):
+    def __init__(self, max_packet_size=64, full_speed_only=False,
+                 block_count=None):
         self.ep0_max_packet_size = min(max_packet_size, 64)  # EP0 caps at 64
         self.bulk_max_packet_size = max_packet_size
         self.full_speed_only = full_speed_only
+        self.block_count = self.BLOCK_COUNT if block_count is None else block_count
         self.utmi = UTMIInterface()
         super().__init__()
 
@@ -183,7 +186,7 @@ class FakeUSBMSCDevice(Elaboratable):
         # Capacity response (big-endian on wire)
         # ================================================================
 
-        last_lba = self.BLOCK_COUNT - 1
+        last_lba = self.block_count - 1
         cap_response = Signal(ReadCapacity10Response)
         m.d.comb += [
             cap_response.last_lba_be.eq(byteswap(Const(last_lba, 32))),
@@ -230,13 +233,31 @@ class FakeUSBMSCDevice(Elaboratable):
         csw_flat = csw.as_value()
 
         # ================================================================
-        # Outgoing data generation
+        # Backing storage (simulation-only: the comb read port implies LUTRAM)
         # ================================================================
 
+        # Byte cursor within the data phase (also reused for capacity/CSW).
         tx_byte_idx = Signal(range(max_xfer_bytes))
-        # Block data pattern: byte index XOR'd with LBA
-        block_data_byte = Signal(8)
-        m.d.comb += block_data_byte.eq(tx_byte_idx[0:8] ^ cbw_lba[0:8])
+
+        storage_addr   = Signal(32)
+        storage_r_data = Signal(8)
+        storage_w_data = Signal(8)
+        storage_w_en   = Signal()
+        m.d.comb += storage_addr.eq(cbw_lba * self.BLOCK_SIZE + tx_byte_idx)
+
+        m.submodules.storage = storage = memory.Memory(
+            shape=unsigned(8), depth=self.BLOCK_SIZE * self.block_count,
+            init=(((i % self.BLOCK_SIZE) ^ (i // self.BLOCK_SIZE)) & 0xFF
+                  for i in range(self.BLOCK_SIZE * self.block_count)))
+        storage_rd = storage.read_port(domain="comb")
+        storage_wr = storage.write_port(domain="usb")
+        m.d.comb += [
+            storage_rd.addr.eq(storage_addr),
+            storage_r_data.eq(storage_rd.data),
+            storage_wr.addr.eq(storage_addr),
+            storage_wr.data.eq(storage_w_data),
+            storage_wr.en.eq(storage_w_en),
+        ]
 
         # ================================================================
         # Response state machine
@@ -303,10 +324,12 @@ class FakeUSBMSCDevice(Elaboratable):
 
             with m.State("SEND-DATA"):
                 is_last_byte = (tx_byte_idx == (xfer_total_bytes - 1))
+                # NOTE: `last` deliberately not asserted: on a maximal-length
+                # stream it would emit a ZLP before the CSW, which real BOT
+                # devices never do (transfer length is known from the CBW).
                 m.d.comb += [
                     stream_in.stream.valid.eq(1),
-                    stream_in.stream.payload.eq(block_data_byte),
-                    stream_in.stream.last.eq(is_last_byte),
+                    stream_in.stream.payload.eq(storage_r_data),
                 ]
                 with m.If(stream_in.stream.ready):
                     m.d.usb += tx_byte_idx.eq(tx_byte_idx + 1)
