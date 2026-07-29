@@ -114,6 +114,15 @@ class Peripheral(wiring.Component):
         """Total commands that completed with an error (wrapping)."""
         count: csr.Field(csr.action.R, unsigned(32))
 
+    class CmdsSubmittedReg(csr.Register, access="r"):
+        """Total commands enqueued (wrapping); the Nth completes at cmds_done == N."""
+        count: csr.Field(csr.action.R, unsigned(32))
+
+    class PlugEventsReg(csr.Register, access="r"):
+        """Times the engine re-enumerated (wrapping); a change invalidates
+        capacity, cached blocks and any queued commands."""
+        count: csr.Field(csr.action.R, unsigned(32))
+
     #
     # Structure of internal command FIFO
     #
@@ -163,6 +172,9 @@ class Peripheral(wiring.Component):
         self._errors     = regs.add("errors",     self.ErrorsReg(),    offset=0x1C)
         self._cmd_blocks = regs.add("cmd_blocks", self.CmdBlocksReg(), offset=0x20)
         self._cmd_dir    = regs.add("cmd_dir",    self.CmdDirReg(),    offset=0x24)
+        self._plug_events = regs.add("plug_events", self.PlugEventsReg(), offset=0x28)
+        self._cmds_submitted = regs.add("cmds_submitted", self.CmdsSubmittedReg(),
+                                        offset=0x2C)
 
         self._bridge = csr.Bridge(regs.as_memory_map())
 
@@ -219,9 +231,15 @@ class Peripheral(wiring.Component):
         # Status registers
         #
 
-        error_flag = Signal()
-        cmds_done  = Signal(32)
-        errors     = Signal(32)
+        error_flag     = Signal()
+        cmds_done      = Signal(32)
+        errors         = Signal(32)
+        plug_events    = Signal(32)
+        cmds_submitted = Signal(32)
+        with m.If(msc_host.recovered):
+            m.d.sync += plug_events.eq(plug_events + 1)
+        with m.If(cmd_fifo.w_en & cmd_fifo.w_rdy):
+            m.d.sync += cmds_submitted.eq(cmds_submitted + 1)
         m.d.comb += [
             self._status.f.connected.r_data.eq(msc_host.status.connected),
             self._status.f.ready.r_data.eq(msc_host.status.ready),
@@ -233,6 +251,8 @@ class Peripheral(wiring.Component):
             self._block_size.f.block_size.r_data.eq(msc_host.status.block_size),
             self._cmds_done.f.count.r_data.eq(cmds_done),
             self._errors.f.count.r_data.eq(errors),
+            self._plug_events.f.count.r_data.eq(plug_events),
+            self._cmds_submitted.f.count.r_data.eq(cmds_submitted),
         ]
 
         #

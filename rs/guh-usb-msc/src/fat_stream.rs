@@ -10,7 +10,7 @@ use fatfs::{ChainMap, FatType, MapNext};
 use log::{info, warn};
 
 use guh_dma::DmaBuf;
-use crate::usb_msc::{UsbMsc, BLOCK_BYTES};
+use crate::usb_msc::{Disconnected, UsbMsc, BLOCK_BYTES};
 
 #[derive(Debug, Clone, Copy)]
 pub enum OpenError {
@@ -83,11 +83,12 @@ impl ClusterMap {
         true
     }
 
-    fn wait_progress<M: UsbMsc>(&self, msc: &M) {
+    fn wait_progress<M: UsbMsc>(&self, msc: &M) -> Result<(), StreamError> {
         match self.fat_window {
-            FatWindow::Filling { seq, .. } => msc.wait_seq(seq),
-            _ => msc.wait_idle(),
+            FatWindow::Filling { seq, .. } => msc.wait_seq(seq)?,
+            _ => msc.wait_idle()?,
         }
+        Ok(())
     }
 
     fn lba_of<M: UsbMsc>(&mut self, msc: &mut M, block: u32) -> Lookup {
@@ -117,18 +118,24 @@ impl ClusterMap {
     }
 }
 
+impl From<Disconnected> for StreamError {
+    fn from(_: Disconnected) -> Self { StreamError::UsbError }
+}
+
 struct ErrorLatch {
     baseline: Option<u32>,
+    plugs: Option<u32>,
     error: Option<StreamError>,
 }
 
 impl ErrorLatch {
     fn new() -> Self {
-        Self { baseline: None, error: None }
+        Self { baseline: None, plugs: None, error: None }
     }
 
     fn rebaseline<M: UsbMsc>(&mut self, msc: &M) {
         self.baseline = Some(msc.error_count());
+        self.plugs = Some(msc.plug_events());
     }
 
     fn check<M: UsbMsc>(&mut self, msc: &M) -> Result<(), StreamError> {
@@ -138,6 +145,13 @@ impl ErrorLatch {
         let baseline = *self.baseline.get_or_insert_with(|| msc.error_count());
         if msc.error_count() != baseline {
             warn!("fat stream: USB MSC transfer error");
+            return Err(self.fail(StreamError::UsbError));
+        }
+        // Catches a disconnect that re-enumerated between polls, which the
+        // spin-side liveness checks can miss entirely.
+        let plugs = *self.plugs.get_or_insert_with(|| msc.plug_events());
+        if msc.plug_events() != plugs {
+            warn!("fat stream: USB MSC device went away");
             return Err(self.fail(StreamError::UsbError));
         }
         Ok(())
@@ -256,10 +270,10 @@ impl FatStream {
             let before = self.logical_write;
             self.tick(msc, 0)?;
             if self.logical_write == before {
-                self.map.wait_progress(msc);
+                self.map.wait_progress(msc)?;
             }
         }
-        msc.wait_idle();
+        msc.wait_idle()?;
         self.errors.check(msc)?;
         Ok(())
     }
@@ -446,9 +460,9 @@ impl FatStreamWriter {
             if self.is_full() || pending < self.chunk_bytes() as u64 {
                 break;
             }
-            self.map.wait_progress(msc);
+            self.map.wait_progress(msc)?;
         }
-        msc.wait_idle();
+        msc.wait_idle()?;
         self.errors.check(msc)?;
         Ok(self.logical_submitted)
     }

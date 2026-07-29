@@ -549,6 +549,7 @@ class USBMSCHost(wiring.Component):
     status:  Out(Status)
     cmd:     In(Command)
     resp:    Out(Response)
+    recovered: Out(1)  # strobed whenever the engine resets itself to recover
     rx_data: Out(stream.Signature(Packet(unsigned(8))))
     tx_data: In(stream.Signature(unsigned(8)))
 
@@ -735,5 +736,6 @@ class USBMSCHost(wiring.Component):
                 self.resp.done.eq(1),
                 self.resp.error.eq(1),
             ]
+        m.d.comb += self.recovered.eq(watchdog_expired | recover_req)
 
         return ResetInserter({"usb": watchdog_expired | recover_req})(m)

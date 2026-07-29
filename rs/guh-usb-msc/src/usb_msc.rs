@@ -13,6 +13,10 @@ pub struct ReadError;
 #[derive(Debug, Clone, Copy)]
 pub struct WriteError;
 
+/// The device went away, or was swapped, while we were waiting on it.
+#[derive(Debug, Clone, Copy)]
+pub struct Disconnected;
+
 #[derive(Debug, Clone, Copy)]
 pub struct UsbMscStatus {
     pub connected: bool,
@@ -39,22 +43,35 @@ pub trait UsbMsc {
         !s.busy && s.fifo_empty
     }
 
+    /// Times the engine re-enumerated (wrapping). Any change invalidates
+    /// capacity, cached blocks, and commands queued across it.
+    fn plug_events(&self) -> u32;
+
+    /// Whether waiting any longer is futile: the device was swapped since
+    /// `plugs`, or there is nothing attached to make progress.
+    fn link_lost(&self, plugs: u32) -> bool {
+        self.plug_events() != plugs || !self.status().connected
+    }
+
     /// Read `buf.len() / 512` contiguous blocks from `start_lba` into `buf`
     /// (len must be a non-zero multiple of 512). `'static` because the DMA
     /// outlives the borrow. Returns the command's seq number, `None` if full.
     fn read_blocks(&mut self, start_lba: u32, buf: &'static DmaBuf) -> Option<u32>;
 
     /// Submit a `read_blocks` and block until it completes, invalidating the
-    /// CPU's cached view of `buf` on success. Spins if the FIFO is full.
+    /// CPU's cached view of `buf` on success. Spins while the FIFO is full,
+    /// giving up if the device disappears.
     fn read_blocks_blocking(
         &mut self, start_lba: u32, buf: &'static DmaBuf,
     ) -> Result<(), ReadError> {
         let errors_before = self.error_count();
+        let plugs = self.plug_events();
         let seq = loop {
             if let Some(seq) = self.read_blocks(start_lba, buf) { break seq; }
+            if self.link_lost(plugs) { return Err(ReadError); }
             core::hint::spin_loop();
         };
-        self.wait_seq(seq);
+        self.wait_seq(seq).map_err(|_| ReadError)?;
         if self.error_count() != errors_before {
             return Err(ReadError);
         }
@@ -67,18 +84,20 @@ pub trait UsbMsc {
     /// modified until the command completes (the engine reads it live).
     fn write_blocks(&mut self, start_lba: u32, buf: &'static DmaBuf) -> Option<u32>;
 
-    /// Submit a `write_blocks` and block until it completes. Spins if the
-    /// FIFO is full. Cache maintenance happens at submit: `write_blocks`
-    /// cleans the dcache over `buf` so the engine reads CPU-written contents.
+    /// Submit a `write_blocks` and block until it completes, giving up if the
+    /// device disappears. Cache maintenance happens at submit: `write_blocks`
+    /// cleans the dcache over `buf`.
     fn write_blocks_blocking(
         &mut self, start_lba: u32, buf: &'static DmaBuf,
     ) -> Result<(), WriteError> {
         let errors_before = self.error_count();
+        let plugs = self.plug_events();
         let seq = loop {
             if let Some(seq) = self.write_blocks(start_lba, buf) { break seq; }
+            if self.link_lost(plugs) { return Err(WriteError); }
             core::hint::spin_loop();
         };
-        self.wait_seq(seq);
+        self.wait_seq(seq).map_err(|_| WriteError)?;
         if self.error_count() != errors_before {
             return Err(WriteError);
         }
@@ -97,16 +116,22 @@ pub trait UsbMsc {
         self.completed_count().wrapping_sub(seq) < 0x8000_0000
     }
 
-    fn wait_seq(&self, seq: u32) {
+    fn wait_seq(&self, seq: u32) -> Result<(), Disconnected> {
+        let plugs = self.plug_events();
         while !self.seq_done(seq) {
+            if self.link_lost(plugs) { return Err(Disconnected); }
             core::hint::spin_loop();
         }
+        Ok(())
     }
 
-    fn wait_idle(&self) {
+    fn wait_idle(&self) -> Result<(), Disconnected> {
+        let plugs = self.plug_events();
         while !self.is_idle() {
+            if self.link_lost(plugs) { return Err(Disconnected); }
             core::hint::spin_loop();
         }
+        Ok(())
     }
 }
 
@@ -144,6 +169,7 @@ impl<M: UsbMsc> UsbMsc for PartitionView<M> {
     fn psram_base(&self) -> u32 { self.inner.psram_base() }
     fn completed_count(&self) -> u32 { self.inner.completed_count() }
     fn error_count(&self) -> u32 { self.inner.error_count() }
+    fn plug_events(&self) -> u32 { self.inner.plug_events() }
 }
 
 #[macro_export]
@@ -159,15 +185,11 @@ macro_rules! impl_usb_msc {
             pub struct $USBMSCX {
                 registers: $PACUSBMSCX,
                 psram_base: u32,
-                submitted: u32,
             }
 
             impl $USBMSCX {
                 pub fn new(registers: $PACUSBMSCX, psram_base: u32) -> Self {
-                    // Seed the submit counter from the hardware completion
-                    // counter, which survives a CPU-only restart.
-                    let submitted = registers.cmds_done().read().count().bits();
-                    Self { registers, psram_base, submitted }
+                    Self { registers, psram_base }
                 }
 
                 pub fn free(self) -> $PACUSBMSCX {
@@ -189,12 +211,16 @@ macro_rules! impl_usb_msc {
                     let physical_offset = buf.psram_offset(self.psram_base);
 
                     // One set of staging registers: a concurrent submitter
-                    // would interleave commands, and `submitted` must advance
-                    // in the order hardware saw starts (else `wait_seq` is wrong).
+                    // would interleave commands. The full-check is inside too,
+                    // so the slot we found free is still free when we fill it.
                     $crate::critical_section::with(|_| {
                         if self.registers.status().read().fifo_full().bit() {
                             return None;
                         }
+                        // The FIFO has room and we are the only submitter, so
+                        // this enqueue is the next one the engine counts.
+                        let seq = self.registers.cmds_submitted().read()
+                            .count().bits().wrapping_add(1);
 
                         self.registers.cmd_lba().write(|w| unsafe {
                             w.lba().bits(start_lba)
@@ -219,8 +245,7 @@ macro_rules! impl_usb_msc {
                             w.start().bit(true)
                         });
 
-                        self.submitted = self.submitted.wrapping_add(1);
-                        Some(self.submitted)
+                        Some(seq)
                     })
                 }
             }
@@ -264,6 +289,10 @@ macro_rules! impl_usb_msc {
 
                 fn error_count(&self) -> u32 {
                     self.registers.errors().read().count().bits()
+                }
+
+                fn plug_events(&self) -> u32 {
+                    self.registers.plug_events().read().count().bits()
                 }
             }
         )+
