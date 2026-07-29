@@ -580,6 +580,7 @@ class USBMSCHost(wiring.Component):
         current_lba = Signal(32)
         current_write = Signal()
         current_block_count = Signal.like(self.cmd.block_count)  # off-by-one encoded
+        current_len_r = Signal(23)
         init_retry  = Signal(range(self._INIT_RETRY_MAX + 1))
         read_retry  = Signal(range(self._READ_RETRY_MAX + 1))
         retry_timer = Signal(range(self._RETRY_DELAY_CYCLES + 1))
@@ -625,7 +626,7 @@ class USBMSCHost(wiring.Component):
             cdb10.lba_be.eq(byteswap(current_lba)),
             # xfer_blocks fits in low byte; high byte is always zero.
             cdb10.xfer_len_be.eq(Cat(Const(0, 8), xfer_blocks)),
-            scsi_cmd.data_len.eq(block_size * xfer_blocks),
+            scsi_cmd.data_len.eq(current_len_r),
             scsi_cmd.stream_data.eq(1),
             scsi_cmd.dir_out.eq(current_write),
         ]
@@ -686,6 +687,7 @@ class USBMSCHost(wiring.Component):
                         current_lba.eq(self.cmd.lba),
                         current_write.eq(self.cmd.write),
                         current_block_count.eq(self.cmd.block_count),
+                        current_len_r.eq(block_size * (self.cmd.block_count + 1)),
                         read_retry.eq(0),
                     ]
                     m.next = "XFER"
