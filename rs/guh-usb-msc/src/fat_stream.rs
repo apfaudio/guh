@@ -1,16 +1,10 @@
-//! ISR-resident FAT32 file streamers (big picture: `rs/README.md`).
-//!
-//! Both directions stream an entire file through a ring buffer in PSRAM by
-//! following the file's FAT cluster chain incrementally, bypassing fatfs in
-//! the hot path. `open` resolves a `fatfs::File` to plain integers; `tick`
-//! never blocks. [`FatStream`] reads and loops; [`FatStreamWriter`] writes
-//! into the file's pre-existing cluster chain and does not loop.
+//! Non-blocking file streaming utilities (see also: `rs/README.md`).
 
-use fatfs::{ChainMap, FatType, MapNext};
+use fatfs::{ChainMap, FatType, FsGeometry, MapNext};
 use log::{info, warn};
 
 use guh_dma::DmaBuf;
-use crate::usb_msc::{Disconnected, UsbMsc, BLOCK_BYTES};
+use crate::usb_msc::{UsbMsc, XferError, BLOCK_BYTES};
 
 #[derive(Debug, Clone, Copy)]
 pub enum OpenError {
@@ -38,12 +32,30 @@ enum Lookup {
     OutOfChain,
 }
 
-struct Resolved {
-    map: ChainMap,
+struct StreamGeometry {
     chunk_blocks: u32,
     n_blocks: u32,
     ring: &'static DmaBuf,
-    fat_cache: &'static DmaBuf,
+}
+
+impl StreamGeometry {
+    fn ring_len(&self) -> u64 {
+        self.ring.len() as u64
+    }
+
+    fn chunk_bytes(&self) -> u32 {
+        self.chunk_blocks * BLOCK_BYTES as u32
+    }
+
+    fn total_bytes(&self) -> u64 {
+        self.n_blocks as u64 * BLOCK_BYTES as u64
+    }
+
+    fn advance_wrapped(&self, logical: u64, cur: u32) -> u64 {
+        let ring = self.ring_len();
+        let last = logical % ring;
+        logical + (cur as u64 + ring - last) % ring
+    }
 }
 
 enum FatWindow {
@@ -60,12 +72,16 @@ struct ClusterMap {
 }
 
 impl ClusterMap {
-    fn new(cfg: &Resolved) -> Self {
+    fn new(fat_cache: &'static DmaBuf, map: ChainMap) -> Self {
         Self {
-            fat_cache: cfg.fat_cache,
-            map: cfg.map,
+            fat_cache,
+            map,
             fat_window: FatWindow::Empty,
         }
+    }
+
+    fn geometry(&self) -> FsGeometry {
+        self.map.geometry()
     }
 
     fn gulp_blocks(&self) -> u32 {
@@ -103,7 +119,7 @@ impl ClusterMap {
         match self.map.sector_of(block, window_first, window) {
             MapNext::Sector(lba) => Lookup::Lba(lba),
             MapNext::NeedSector(sector) => {
-                let gulp_sector = self.map.geometry().fat_window_start(sector, self.gulp_blocks());
+                let gulp_sector = self.geometry().fat_window_start(sector, self.gulp_blocks());
                 if let Some(seq) = msc.read_blocks(gulp_sector, self.fat_cache) {
                     self.fat_window = FatWindow::Filling {
                         first_sector: gulp_sector, seq };
@@ -118,8 +134,8 @@ impl ClusterMap {
     }
 }
 
-impl From<Disconnected> for StreamError {
-    fn from(_: Disconnected) -> Self { StreamError::UsbError }
+impl From<XferError> for StreamError {
+    fn from(_: XferError) -> Self { StreamError::UsbError }
 }
 
 struct ErrorLatch {
@@ -166,7 +182,7 @@ impl ErrorLatch {
 fn resolve<IO, TP, OCC>(
     file: &fatfs::File<'_, IO, TP, OCC>,
     cfg: &StreamConfig,
-) -> Result<Resolved, OpenError>
+) -> Result<(StreamGeometry, ClusterMap), OpenError>
 where
     IO: fatfs::ReadWriteSeek,
     TP: fatfs::TimeProvider,
@@ -214,17 +230,14 @@ where
     info!("stream open: file_size={} cluster_blocks={} chunk={} n_blocks={}",
           file_size, cluster_blocks, chunk, n_blocks);
 
-    Ok(Resolved {
-        map,
-        chunk_blocks: chunk,
-        n_blocks,
-        ring: cfg.ring,
-        fat_cache: cfg.fat_cache,
-    })
+    Ok((
+        StreamGeometry { chunk_blocks: chunk, n_blocks, ring: cfg.ring },
+        ClusterMap::new(cfg.fat_cache, map),
+    ))
 }
 
 pub struct FatStream {
-    cfg: Resolved,
+    geo: StreamGeometry,
     map: ClusterMap,
 
     logical_write: u64,
@@ -243,10 +256,9 @@ impl FatStream {
         IO: fatfs::ReadWriteSeek,
         TP: fatfs::TimeProvider,
     {
-        let cfg = resolve(file, cfg)?;
-        let map = ClusterMap::new(&cfg);
+        let (geo, map) = resolve(file, cfg)?;
         Ok(Self {
-            cfg,
+            geo,
             map,
             logical_write: 0,
             logical_read: 0,
@@ -255,18 +267,11 @@ impl FatStream {
         })
     }
 
-    fn ring_len(&self) -> u64 {
-        self.cfg.ring.len() as u64
-    }
-
-    fn chunk_bytes(&self) -> u32 {
-        self.cfg.chunk_blocks * BLOCK_BYTES as u32
-    }
-
     pub fn prefill<M: UsbMsc>(&mut self, msc: &mut M) -> Result<(), StreamError> {
+        msc.wait_idle()?;
         self.errors.rebaseline(msc);
 
-        while self.logical_write < self.ring_len() {
+        while self.logical_write < self.geo.ring_len() {
             let before = self.logical_write;
             self.tick(msc, 0)?;
             if self.logical_write == before {
@@ -283,7 +288,7 @@ impl FatStream {
     }
 
     pub fn bytes_total(&self) -> u64 {
-        self.cfg.n_blocks as u64 * BLOCK_BYTES as u64
+        self.geo.total_bytes()
     }
 
     pub fn underruns(&self) -> u32 {
@@ -291,9 +296,8 @@ impl FatStream {
     }
 
     fn update_read_position(&mut self, cur_read: u32) {
-        let ring = self.ring_len();
-        let last = self.logical_read % ring;
-        self.logical_read += (cur_read as u64 + ring - last) % ring;
+        let ring = self.geo.ring_len();
+        self.logical_read = self.geo.advance_wrapped(self.logical_read, cur_read);
         if self.logical_read > self.logical_write {
             self.underruns = self.underruns.saturating_add(1);
         }
@@ -312,23 +316,23 @@ impl FatStream {
             // Saturating: an underrun must read as an empty ring, not a u64
             // underflow that wedges this check.
             let fill = self.logical_write.saturating_sub(self.logical_read);
-            if fill + self.chunk_bytes() as u64 > self.ring_len() {
+            if fill + self.geo.chunk_bytes() as u64 > self.geo.ring_len() {
                 break;
             }
 
             // n_blocks is a multiple of chunk_blocks, so the wrap lands on a
             // chunk boundary.
             let block = ((self.logical_write / BLOCK_BYTES as u64)
-                         % self.cfg.n_blocks as u64) as u32;
+                         % self.geo.n_blocks as u64) as u32;
             match self.map.lba_of(msc, block) {
                 Lookup::Lba(lba) => {
-                    let ring_off = (self.logical_write % self.ring_len()) as usize;
-                    let dst = self.cfg.ring.slice(
-                        ring_off, (self.cfg.chunk_blocks as usize) * BLOCK_BYTES);
+                    let ring_off = (self.logical_write % self.geo.ring_len()) as usize;
+                    let dst = self.geo.ring.slice(
+                        ring_off, (self.geo.chunk_blocks as usize) * BLOCK_BYTES);
                     if msc.read_blocks(lba, dst).is_none() {
                         break;
                     }
-                    self.logical_write += self.chunk_bytes() as u64;
+                    self.logical_write += self.geo.chunk_bytes() as u64;
                 }
                 Lookup::Pending => break,
                 Lookup::OutOfChain =>
@@ -350,7 +354,7 @@ impl FatStream {
 /// submitted chunks may still be read live by the engine. `tick` fails the
 /// stream with [`StreamError::Overrun`] if breached (best-effort).
 pub struct FatStreamWriter {
-    cfg: Resolved,
+    geo: StreamGeometry,
     map: ClusterMap,
 
     logical_producer: u64,
@@ -368,10 +372,9 @@ impl FatStreamWriter {
         IO: fatfs::ReadWriteSeek,
         TP: fatfs::TimeProvider,
     {
-        let cfg = resolve(file, cfg)?;
-        let map = ClusterMap::new(&cfg);
+        let (geo, map) = resolve(file, cfg)?;
         Ok(Self {
-            cfg,
+            geo,
             map,
             logical_producer: 0,
             logical_submitted: 0,
@@ -379,16 +382,8 @@ impl FatStreamWriter {
         })
     }
 
-    fn ring_len(&self) -> u64 {
-        self.cfg.ring.len() as u64
-    }
-
-    fn chunk_bytes(&self) -> u32 {
-        self.cfg.chunk_blocks * BLOCK_BYTES as u32
-    }
-
     pub fn bytes_total(&self) -> u64 {
-        self.cfg.n_blocks as u64 * BLOCK_BYTES as u64
+        self.geo.total_bytes()
     }
 
     pub fn is_full(&self) -> bool {
@@ -403,18 +398,13 @@ impl FatStreamWriter {
         self.logical_producer
     }
 
-    fn update_producer_position(&mut self, cur: u32) {
-        let ring = self.ring_len();
-        let last = self.logical_producer % ring;
-        self.logical_producer += (cur as u64 + ring - last) % ring;
-    }
-
     pub fn tick<M: UsbMsc>(&mut self, msc: &mut M, produced_pos: u32) -> Result<(), StreamError> {
         self.errors.check(msc)?;
-        self.update_producer_position(produced_pos);
+        self.logical_producer =
+            self.geo.advance_wrapped(self.logical_producer, produced_pos);
 
         if !self.is_full()
-            && self.logical_producer - self.logical_submitted > self.ring_len() / 2
+            && self.logical_producer - self.logical_submitted > self.geo.ring_len() / 2
         {
             warn!("fat stream: producer overran the ring (produced {}, submitted {})",
                   self.logical_producer, self.logical_submitted);
@@ -430,20 +420,20 @@ impl FatStreamWriter {
                 break;
             }
             let pending = self.logical_producer - self.logical_submitted;
-            if pending < self.chunk_bytes() as u64 {
+            if pending < self.geo.chunk_bytes() as u64 {
                 break;
             }
 
             let block = (self.logical_submitted / BLOCK_BYTES as u64) as u32;
             match self.map.lba_of(msc, block) {
                 Lookup::Lba(lba) => {
-                    let ring_off = (self.logical_submitted % self.ring_len()) as usize;
-                    let src = self.cfg.ring.slice(
-                        ring_off, (self.cfg.chunk_blocks as usize) * BLOCK_BYTES);
+                    let ring_off = (self.logical_submitted % self.geo.ring_len()) as usize;
+                    let src = self.geo.ring.slice(
+                        ring_off, (self.geo.chunk_blocks as usize) * BLOCK_BYTES);
                     if msc.write_blocks(lba, src).is_none() {
                         break;
                     }
-                    self.logical_submitted += self.chunk_bytes() as u64;
+                    self.logical_submitted += self.geo.chunk_bytes() as u64;
                 }
                 Lookup::Pending => break,
                 Lookup::OutOfChain =>
@@ -457,7 +447,7 @@ impl FatStreamWriter {
         loop {
             self.tick(msc, produced_pos)?;
             let pending = self.logical_producer - self.logical_submitted;
-            if self.is_full() || pending < self.chunk_bytes() as u64 {
+            if self.is_full() || pending < self.geo.chunk_bytes() as u64 {
                 break;
             }
             self.map.wait_progress(msc)?;

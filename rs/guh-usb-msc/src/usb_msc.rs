@@ -5,17 +5,10 @@ use guh_dma::DmaBuf;
 /// are rejected at mount rather than accommodated.
 pub const BLOCK_BYTES: usize = 512;
 
-/// A blocking `read_blocks_blocking` observed a device error mid-transfer.
+/// A transfer failed: the device reported an error mid-transfer, or it went
+/// away (or was swapped) while we were waiting on it.
 #[derive(Debug, Clone, Copy)]
-pub struct ReadError;
-
-/// A blocking `write_blocks_blocking` observed a device error mid-transfer.
-#[derive(Debug, Clone, Copy)]
-pub struct WriteError;
-
-/// The device went away, or was swapped, while we were waiting on it.
-#[derive(Debug, Clone, Copy)]
-pub struct Disconnected;
+pub struct XferError;
 
 #[derive(Debug, Clone, Copy)]
 pub struct UsbMscStatus {
@@ -63,17 +56,17 @@ pub trait UsbMsc {
     /// giving up if the device disappears.
     fn read_blocks_blocking(
         &mut self, start_lba: u32, buf: &'static DmaBuf,
-    ) -> Result<(), ReadError> {
+    ) -> Result<(), XferError> {
         let errors_before = self.error_count();
         let plugs = self.plug_events();
         let seq = loop {
             if let Some(seq) = self.read_blocks(start_lba, buf) { break seq; }
-            if self.link_lost(plugs) { return Err(ReadError); }
+            if self.link_lost(plugs) { return Err(XferError); }
             core::hint::spin_loop();
         };
-        self.wait_seq(seq).map_err(|_| ReadError)?;
+        self.wait_seq(seq)?;
         if self.error_count() != errors_before {
-            return Err(ReadError);
+            return Err(XferError);
         }
         buf.invalidate();
         Ok(())
@@ -89,17 +82,17 @@ pub trait UsbMsc {
     /// cleans the dcache over `buf`.
     fn write_blocks_blocking(
         &mut self, start_lba: u32, buf: &'static DmaBuf,
-    ) -> Result<(), WriteError> {
+    ) -> Result<(), XferError> {
         let errors_before = self.error_count();
         let plugs = self.plug_events();
         let seq = loop {
             if let Some(seq) = self.write_blocks(start_lba, buf) { break seq; }
-            if self.link_lost(plugs) { return Err(WriteError); }
+            if self.link_lost(plugs) { return Err(XferError); }
             core::hint::spin_loop();
         };
-        self.wait_seq(seq).map_err(|_| WriteError)?;
+        self.wait_seq(seq)?;
         if self.error_count() != errors_before {
-            return Err(WriteError);
+            return Err(XferError);
         }
         Ok(())
     }
@@ -116,19 +109,19 @@ pub trait UsbMsc {
         self.completed_count().wrapping_sub(seq) < 0x8000_0000
     }
 
-    fn wait_seq(&self, seq: u32) -> Result<(), Disconnected> {
+    fn wait_seq(&self, seq: u32) -> Result<(), XferError> {
         let plugs = self.plug_events();
         while !self.seq_done(seq) {
-            if self.link_lost(plugs) { return Err(Disconnected); }
+            if self.link_lost(plugs) { return Err(XferError); }
             core::hint::spin_loop();
         }
         Ok(())
     }
 
-    fn wait_idle(&self) -> Result<(), Disconnected> {
+    fn wait_idle(&self) -> Result<(), XferError> {
         let plugs = self.plug_events();
         while !self.is_idle() {
-            if self.link_lost(plugs) { return Err(Disconnected); }
+            if self.link_lost(plugs) { return Err(XferError); }
             core::hint::spin_loop();
         }
         Ok(())
