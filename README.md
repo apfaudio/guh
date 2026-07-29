@@ -94,6 +94,26 @@ For more advanced usage, see how this library is used in the [Tiliqua](https://g
 
 **Tiliqua USB-C Adapter:** Tiliqua has a USB Type-C receptacle instead of Type-A like Cynthion. Since this repository does not include TUSB322I drivers, you must use a **USB-C to USB-A adapter** to connect USB devices. The full Tiliqua repository does not require an adapter.
 
+## `guh/periph` and `rs` directories
+
+An experimental USB2 mass-storage host peripheral for RISCV cores, with accompanying rust HAL can be found here. See [rs/README.md](rs/README.md).
+
 # License
 
 BSD 3-Clause, same as LUNA. See `LICENSE` text in this repository.
+
+# AI Disclosure/Policy
+
+(added for commits post-June 2026, as of now this is concentrated on the work in `rs/`)
+
+Assistance from Kimi K3 + OpenCode was employed whilst spiking different API choices, and for auditing the codebase for bugs. All architectural decisions and code has been reviewed by me - errors are my own. In this repository, all documentation, PR descriptions and commit messages are human.
+
+**For contributors**: I don't foresee taking contributions to this repository, as it is quite the collection of (functional) hacks - but if you are enthusiastic, please keep in mind the following points borrowed from `betrusted-io/xous-core`:
+
+```
+- When you submit a contribution, you represent that you are the author and that you are fully accountable for the entirety of the contribution.
+- You are responsible for your contribution, including vouching for the quality, license compliance, and utility of your submission.
+- Using AI assistance in your contribution does not relieve you of the responsibility to ensure that your contribution meets project standards; your contributions must be modular, reviewable, and clearly explainable.
+```
+
+You should be prepared to provide **substantial evidence** of the quality of your contribution, as any changes to this library generally require extensive hardware testing / fuzzing, sometimes using specialized hardware (i.e. a USB2 analyzer, testing across many types of USB devices, etc).
