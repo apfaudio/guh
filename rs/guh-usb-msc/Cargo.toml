@@ -3,7 +3,7 @@ name = "guh-usb-msc"
 version = "0.0.0"
 edition = "2021"
 categories = ["embedded", "hardware-support", "no-std"]
-description = "HAL for the guh USB Mass Storage Class DMA peripheral."
+description = "RISCV/Rust HAL for guh's custom usb msc peripheral."
 
 [lib]
 test = true
@@ -17,6 +17,5 @@ fatfs = { git = "https://github.com/vk2seb/rust-fatfs.git", branch = "seb/dma-ge
 
 [features]
 default = []
-# fatfs block-device adapter over the UsbMsc trait (mount/dir-scan slow path)
-# and the FAT chain-following ring streamer (hot path).
+# without this you only get the raw hal layer - this gives you fs ops from rust-fatfs
 fatfs = ["dep:fatfs"]
