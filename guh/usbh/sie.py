@@ -60,6 +60,7 @@ class USBSIEInterface(wiring.Signature):
         sof_frame:      unsigned(11)
         reset_active:   unsigned(1)
         detected_speed: USBHostSpeed
+        disconnected:   unsigned(1)
 
     def __init__(self):
         super().__init__({
@@ -403,6 +404,10 @@ class USBSIE(wiring.Component):
         m.d.comb += [
             self.ctrl.status.reset_active.eq(reset_ctrl.reset_active),
             self.ctrl.status.detected_speed.eq(reset_ctrl.detected_speed),
+            # We drive SE0 ourselves during a bus reset, which the PHY would
+            # otherwise report as a disconnect.
+            self.ctrl.status.disconnected.eq(
+                self.utmi.host_disconnect & ~reset_ctrl.reset_active),
         ]
         detected_speed = reset_ctrl.detected_speed
         # Add reset controller TX to the multiplexer (with highest priority)

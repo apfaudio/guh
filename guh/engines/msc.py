@@ -142,6 +142,8 @@ class SCSIBulkHost(wiring.Component):
         done:     unsigned(1)
         error:    unsigned(1)
         rejected: unsigned(1)
+        aborted:  unsigned(1)  # transport fault, device phase state unknown
+        timeout:  unsigned(1)  # rejection was a timeout, i.e. no response at all
 
     cmd:      In(Command)
     status:   Out(Status)
@@ -317,6 +319,8 @@ class SCSIBulkHost(wiring.Component):
                             m.d.comb += [
                                 self.status.done.eq(1),
                                 self.status.rejected.eq(1),
+                                self.status.timeout.eq(
+                                    enum.ctrl.status.response == TransferResponse.TIMEOUT),
                             ]
                             m.next = "IDLE"
 
@@ -363,6 +367,16 @@ class SCSIBulkHost(wiring.Component):
                                 m.next = "DATA"
                         with m.Case(TransferResponse.NAK):
                             m.next = "DATA"
+                        with m.Default():
+                            # STALL / CRC_ERROR / TIMEOUT / RX_OVERFLOW. Some
+                            # data phase bytes may already be downstream, so
+                            # this is an error, not a retryable rejection.
+                            m.d.comb += [
+                                self.status.done.eq(1),
+                                self.status.error.eq(1),
+                                self.status.aborted.eq(1),
+                            ]
+                            m.next = "IDLE"
 
             with m.State("DATA-OUT-LOAD"):
                 m.d.comb += [
@@ -459,6 +473,13 @@ class SCSIBulkHost(wiring.Component):
                                 m.next = "IDLE"
                         with m.Case(TransferResponse.NAK):
                             m.next = "CSW"
+                        with m.Default():
+                            m.d.comb += [
+                                self.status.done.eq(1),
+                                self.status.error.eq(1),
+                                self.status.aborted.eq(1),
+                            ]
+                            m.next = "IDLE"
 
         return m
 
@@ -485,10 +506,12 @@ class USBMSCHost(wiring.Component):
     3. Set cmd.lba to desired block address (and cmd.write for writes) and
        strobe cmd.start
     4. Reads: if the read succeeds, up to status.block_size*(cmd.block_count+1)
-       bytes are streamed out on rx_data. Any block fetches which fail are
-       retried up to 5x before we bail (some msc devices will reject sequential
-       block fetches 1-2x depending on where you are fetching from, I haven't
-       read the spec thoroughly, just found this empirically).
+       bytes are streamed out on rx_data. Block fetches the device rejects
+       outright are retried up to 5x before we bail (some msc devices will
+       reject sequential block fetches 1-2x depending on where you are fetching
+       from, I haven't read the spec thoroughly, just found this empirically).
+       Failures partway through a read are not retried - some bytes are already
+       on rx_data, so the caller must flush its own sink.
        Writes: the same byte count is consumed from tx_data. Failed writes are
        NOT retried (the data stream was already consumed); on resp.error the
        caller must flush its own data source before the next command.
@@ -567,6 +590,15 @@ class USBMSCHost(wiring.Component):
         watchdog_expired = Signal()
         m.d.usb += watchdog.eq(watchdog + 1)
         m.d.comb += watchdog_expired.eq(watchdog >= (self._WATCHDOG_CYCLES - 1))
+
+        # An aborted transfer leaves the device mid-phase, and we implement
+        # neither BBB reset nor CLEAR_FEATURE, so re-enumerate (same for a
+        # departed device: it comes back unaddressed). `enumerated` gates
+        # the disconnect so we don't re-trigger on the way up.
+        recover_req = Signal()
+        with m.If((scsi.status.done & scsi.status.aborted) |
+                  (enum.status.enumerated & enum.ctrl.status.disconnected)):
+            m.d.usb += recover_req.eq(1)
 
         m.d.comb += [
             self.status.connected.eq(enum.status.enumerated),
@@ -647,6 +679,7 @@ class USBMSCHost(wiring.Component):
 
             with m.State("READY"):
                 m.d.comb += self.status.busy.eq(0)
+                m.d.usb += watchdog.eq(0)
                 with m.If(self.cmd.start):
                     m.d.usb += [
                         current_lba.eq(self.cmd.lba),
@@ -664,22 +697,25 @@ class USBMSCHost(wiring.Component):
                 m.d.comb += xfer10_setup
                 with m.If(scsi.status.done):
                     failed = scsi.status.error | scsi.status.rejected
-                    # Only reads are retried: retrying a WRITE_10 would need
-                    # the already-consumed tx_data stream replayed from the
-                    # start, which is the caller's call to make.
-                    with m.If(failed & ~current_write &
+                    # `rejected` without `error` is the only failure where no
+                    # data phase ran; replaying one that did would double-stream
+                    # into a consumer that already has its bytes. Writes are
+                    # never retried, their tx_data source is already consumed.
+                    retryable = scsi.status.rejected & ~scsi.status.error
+                    with m.If(retryable & ~current_write &
                               (read_retry < self._READ_RETRY_MAX)):
-                        # Transient failure (NAK / PHASE_ERROR / etc.)
                         m.d.usb += [
                             read_retry.eq(read_retry + 1),
                             retry_timer.eq(self._RETRY_DELAY_CYCLES),
                         ]
                         m.next = "XFER-RETRY-DELAY"
                     with m.Else():
-                        # Success, or out of retry budget.
-                        with m.If(~failed):
-                            m.d.usb += watchdog.eq(0)
-                        m.d.usb += read_retry.eq(0)
+                        # Success, or out of retry budget. Having burnt the
+                        # whole budget on timeouts means nothing is answering
+                        # at the address we enumerated, so assume it left.
+                        with m.If(scsi.status.timeout):
+                            m.d.usb += recover_req.eq(1)
+                        m.d.usb += [watchdog.eq(0), read_retry.eq(0)]
                         m.d.comb += [
                             self.resp.done.eq(1),
                             self.resp.error.eq(failed),
@@ -691,4 +727,13 @@ class USBMSCHost(wiring.Component):
                 with m.If(retry_timer == 0):
                     m.next = "XFER"
 
-        return ResetInserter({"usb": watchdog_expired})(m)
+        # The reset below tears down any in-flight transfer without the FSM
+        # ever completing, so report one here. Normal completions just
+        # re-report; the peripheral retires on the state transition.
+        with m.If(watchdog_expired | recover_req):
+            m.d.comb += [
+                self.resp.done.eq(1),
+                self.resp.error.eq(1),
+            ]
+
+        return ResetInserter({"usb": watchdog_expired | recover_req})(m)
