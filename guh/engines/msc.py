@@ -195,12 +195,15 @@ class SCSIBulkHost(wiring.Component):
 
         endp_in = enum.parser.o.i_endp.number
         endp_out = enum.parser.o.o_endp.number
+        mps_in = enum.parser.o.i_endp_mps.size
         pid_in = Signal(DataPID, init=DataPID.DATA0)
         pid_out = Signal(DataPID, init=DataPID.DATA0)
 
         rx_packet = packet_layout(rx_fifo.w_stream.payload)
         stream_mode = Signal()
         dir_out = Signal()
+        rx_pkt_len = Signal(range(self.MAX_BULK_PACKET_BYTES + 1))
+        short_read = Signal()
 
         # OUT packets are chunked by the OUT endpoint's wMaxPacketSize and
         # mirrored into a replay buffer, since the SIE drains its tx FIFO
@@ -270,6 +273,7 @@ class SCSIBulkHost(wiring.Component):
                         data_len.eq(self.cmd.data_len),
                         stream_mode.eq(self.cmd.stream_data),
                         dir_out.eq(self.cmd.dir_out),
+                        short_read.eq(0),
                     ]
                     m.next = "CBW-LOAD"
 
@@ -334,6 +338,7 @@ class SCSIBulkHost(wiring.Component):
                     (rx_fifo.depth - rx_fifo.level) >= self.MAX_BULK_PACKET_BYTES)
                 with m.If(enum.ctrl.status.idle & (rx_has_room | ~stream_mode)):
                     m.d.comb += start_bulk_in(endp_in)
+                    m.d.usb += rx_pkt_len.eq(0)
                     m.next = "DATA-RX"
 
             with m.State("DATA-RX"):
@@ -354,13 +359,17 @@ class SCSIBulkHost(wiring.Component):
                     m.d.usb += [
                         rx_byte_idx.eq(rx_byte_idx + 1),
                         rx_data_count.eq(rx_data_count + 1),
+                        rx_pkt_len.eq(rx_pkt_len + 1),
                     ]
 
                 with m.If(enum.ctrl.status.idle):
                     with m.Switch(enum.ctrl.status.response):
                         with m.Case(TransferResponse.ACK):
                             m.d.usb += pid_in.eq(Mux(pid_in, DataPID.DATA0, DataPID.DATA1))
-                            with m.If(rx_data_count >= data_len):
+                            with m.If((rx_data_count >= data_len) |
+                                      (rx_pkt_len < mps_in)):
+                                with m.If(rx_data_count < data_len):
+                                    m.d.usb += short_read.eq(1)
                                 m.d.usb += rx_byte_idx.eq(0)
                                 m.next = "CSW"
                             with m.Else():
@@ -468,7 +477,9 @@ class SCSIBulkHost(wiring.Component):
                                 m.d.usb += cbw_tag.eq(cbw_tag + 1)
                                 m.d.comb += [
                                     self.status.done.eq(1),
-                                    self.status.error.eq(csw_sig.bCSWStatus != CSWStatus.PASSED),
+                                    self.status.error.eq(
+                                        (csw_sig.bCSWStatus != CSWStatus.PASSED) |
+                                        (stream_mode & short_read)),
                                 ]
                                 m.next = "IDLE"
                         with m.Case(TransferResponse.NAK):
