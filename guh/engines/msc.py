@@ -34,11 +34,12 @@ CBW_SIGNATURE = 0x43425355
 CSW_SIGNATURE = 0x53425355
 
 class SCSIOpCode(enum.Enum, shape=unsigned(8)):
-    TEST_UNIT_READY  = 0x00
-    REQUEST_SENSE    = 0x03
-    READ_CAPACITY_10 = 0x25
-    READ_10          = 0x28
-    WRITE_10         = 0x2A
+    TEST_UNIT_READY      = 0x00
+    REQUEST_SENSE        = 0x03
+    READ_CAPACITY_10     = 0x25
+    READ_10              = 0x28
+    WRITE_10             = 0x2A
+    SYNCHRONIZE_CACHE_10 = 0x35
 
 
 class CBWFlags(enum.Enum, shape=unsigned(8)):
@@ -536,6 +537,12 @@ class SenseReturn(enum.Enum, shape=unsigned(2)):
     READY           = 3
 
 
+class XferOp(enum.Enum, shape=unsigned(2)):
+    READ  = 0
+    WRITE = 1
+    FLUSH = 2
+
+
 class USBMSCHost(wiring.Component):
     """
     USB Mass Storage Class Host - block device interface.
@@ -588,6 +595,7 @@ class USBMSCHost(wiring.Component):
     _READ_RETRY_MAX = 5               # READ_10 retries before reporting failure
     _RETRY_DELAY_CYCLES = 2048        # ~34 µs at 60 MHz, post-CSW settling time
     _DEFAULT_BLOCK_SIZE_BYTES = 512   # vast majority of block devices use 512-byte blocks
+    _AUTO_FLUSH_IDLE_CYCLES = 6_000_000  # 100ms @ 60MHz
 
     status:  Out(Status)
     cmd:     In(Command)
@@ -620,16 +628,16 @@ class USBMSCHost(wiring.Component):
 
         block_size = Signal(16, init=self._DEFAULT_BLOCK_SIZE_BYTES)
         block_count = Signal(32)
-        current_lba = Signal(32)
-        current_write = Signal()
-        current_block_count = Signal.like(self.cmd.block_count)  # off-by-one encoded
-        current_len_r = Signal(23)
+        current_op = Signal(XferOp)
+        xfer_cdb = Signal(CDB10)
+        xfer_data_len = Signal(23)
         init_retry  = Signal(range(self._INIT_RETRY_MAX + 1))
         read_retry  = Signal(range(self._READ_RETRY_MAX + 1))
         retry_timer = Signal(range(self._RETRY_DELAY_CYCLES + 1))
 
-        xfer_blocks = Signal(range(MAX_BLOCKS_PER_XFER + 1))  # decoded: 1..MAX_BLOCKS_PER_XFER
-        m.d.comb += xfer_blocks.eq(current_block_count + 1)
+        # write auto-flush / SYNCHRONIZE CACHE.
+        dirty      = Signal()
+        idle_timer = Signal(range(self._AUTO_FLUSH_IDLE_CYCLES + 1))
 
         watchdog = Signal(32)
         watchdog_expired = Signal()
@@ -671,14 +679,10 @@ class USBMSCHost(wiring.Component):
             scsi_cmd.data_len.eq(READ_CAPACITY_SIZE_BYTES),
         ]
         xfer10_setup = [
-            cdb10.opcode.eq(Mux(current_write, SCSIOpCode.WRITE_10,
-                                               SCSIOpCode.READ_10)),
-            cdb10.lba_be.eq(byteswap(current_lba)),
-            # xfer_blocks fits in low byte; high byte is always zero.
-            cdb10.xfer_len_be.eq(Cat(Const(0, 8), xfer_blocks)),
-            scsi_cmd.data_len.eq(current_len_r),
-            scsi_cmd.stream_data.eq(1),
-            scsi_cmd.dir_out.eq(current_write),
+            cdb10.eq(xfer_cdb),
+            scsi_cmd.data_len.eq(xfer_data_len),
+            scsi_cmd.stream_data.eq(current_op != XferOp.FLUSH),
+            scsi_cmd.dir_out.eq(current_op == XferOp.WRITE),
         ]
 
         with m.FSM(domain="usb"):
@@ -736,13 +740,31 @@ class USBMSCHost(wiring.Component):
                 m.d.usb += watchdog.eq(0)
                 with m.If(self.cmd.start):
                     m.d.usb += [
-                        current_lba.eq(self.cmd.lba),
-                        current_write.eq(self.cmd.write),
-                        current_block_count.eq(self.cmd.block_count),
-                        current_len_r.eq(block_size * (self.cmd.block_count + 1)),
+                        current_op.eq(Mux(self.cmd.write, XferOp.WRITE,
+                                                          XferOp.READ)),
+                        xfer_cdb.opcode.eq(Mux(self.cmd.write, SCSIOpCode.WRITE_10,
+                                                               SCSIOpCode.READ_10)),
+                        xfer_cdb.lba_be.eq(byteswap(self.cmd.lba)),
+                        xfer_cdb.xfer_len_be.eq(Cat(Const(0, 8), self.cmd.block_count + 1)),
+                        xfer_data_len.eq(block_size * (self.cmd.block_count + 1)),
                         read_retry.eq(0),
+                        dirty.eq(dirty | self.cmd.write),
+                        idle_timer.eq(0),
                     ]
                     m.next = "XFER"
+                # Idle for a while w/ unflushed writes: emit SYNCHRONIZE CACHE.
+                with m.Elif(dirty):
+                    m.d.usb += idle_timer.eq(idle_timer + 1)
+                    with m.If(idle_timer == self._AUTO_FLUSH_IDLE_CYCLES):
+                        m.d.usb += [
+                            current_op.eq(XferOp.FLUSH),
+                            xfer_cdb.eq(0),
+                            xfer_cdb.opcode.eq(SCSIOpCode.SYNCHRONIZE_CACHE_10),
+                            xfer_data_len.eq(0),
+                            read_retry.eq(0),
+                            idle_timer.eq(0),
+                        ]
+                        m.next = "XFER"
 
             with m.State("XFER"):
                 m.d.comb += xfer10_setup + [scsi_cmd.start.eq(1)]
@@ -757,7 +779,7 @@ class USBMSCHost(wiring.Component):
                     # into a consumer that already has its bytes. Writes are
                     # never retried, their tx_data source is already consumed.
                     retryable = scsi.status.rejected & ~scsi.status.error
-                    with m.If(retryable & ~current_write &
+                    with m.If(retryable & (current_op == XferOp.READ) &
                               (read_retry < self._READ_RETRY_MAX)):
                         m.d.usb += [
                             read_retry.eq(read_retry + 1),
@@ -772,10 +794,14 @@ class USBMSCHost(wiring.Component):
                         with m.If(scsi.status.timeout):
                             m.d.usb += recover_req.eq(1)
                         m.d.usb += [watchdog.eq(0), read_retry.eq(0)]
-                        m.d.comb += [
-                            self.resp.done.eq(1),
-                            self.resp.error.eq(failed),
-                        ]
+                        # autoflush: on failure keep `dirty` so it retries.
+                        with m.If(current_op == XferOp.FLUSH):
+                            m.d.usb += dirty.eq(failed)
+                        with m.Else():
+                            m.d.comb += [
+                                self.resp.done.eq(1),
+                                self.resp.error.eq(failed),
+                            ]
                         with m.If(scsi.status.error & ~scsi.status.aborted &
                                   ~scsi.status.timeout):
                             m.d.usb += sense_return.eq(SenseReturn.READY)
