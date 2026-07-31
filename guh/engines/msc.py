@@ -68,6 +68,14 @@ class CDB10(data.Struct):
     _padding:    unsigned(48)
 
 
+class CDBRequestSense(data.Struct):
+    opcode:     unsigned(8)
+    _reserved:  unsigned(24)
+    alloc_len:  unsigned(8)
+    control:    unsigned(8)
+    _padding:   unsigned(80)
+
+
 class CBW(data.Struct):
     dCBWSignature:          unsigned(32)
     dCBWTag:                unsigned(32)
@@ -80,6 +88,7 @@ class CBW(data.Struct):
     CBWCB:                  data.UnionLayout({
         "cdb6":  CDB6,
         "cdb10": CDB10,
+        "sense": CDBRequestSense,
     })
 
 
@@ -94,9 +103,23 @@ class ReadCapacity10Response(data.Struct):
     last_lba_be:   unsigned(32)  # big-endian
     block_size_be: unsigned(32)  # big-endian
 
+class SenseData(data.Struct):
+    response_code:        unsigned(8)   # 0x70 current, 0x71 deferred
+    _obsolete:            unsigned(8)
+    sense_key:            unsigned(8)   # low nibble; upper bits are flags
+    information_be:       unsigned(32)  # big-endian
+    additional_len:       unsigned(8)   # bytes following this one
+    cmd_specific_info_be: unsigned(32)  # big-endian
+    asc:                  unsigned(8)
+    ascq:                 unsigned(8)
+    fru_code:             unsigned(8)
+    sense_key_specific:   unsigned(24)
+
+
 CBW_SIZE_BYTES = CBW.as_shape().size // 8
 CSW_SIZE_BYTES = CSW.as_shape().size // 8
 READ_CAPACITY_SIZE_BYTES = ReadCapacity10Response.as_shape().size // 8
+SENSE_DATA_BYTES = SenseData.as_shape().size // 8
 
 
 def byteswap(value):
@@ -135,6 +158,7 @@ class SCSIBulkHost(wiring.Component):
         cdb:         data.UnionLayout({
             "cdb6":  CDB6,
             "cdb10": CDB10,
+            "sense": CDBRequestSense,
         })
 
     class Status(data.Struct):
@@ -352,7 +376,8 @@ class SCSIBulkHost(wiring.Component):
                     ]
                 with m.Else():
                     m.d.comb += enum.ctrl.rxs.ready.eq(1)
-                    with m.If(enum.ctrl.rxs.valid):
+                    with m.If(enum.ctrl.rxs.valid &
+                              (rx_byte_idx < READ_CAPACITY_SIZE_BYTES)):
                         m.d.usb += captured_flat.word_select(rx_byte_idx, 8).eq(enum.ctrl.rxs.payload)
 
                 with m.If(enum.ctrl.rxs.valid & enum.ctrl.rxs.ready):
@@ -504,6 +529,13 @@ MAX_BLOCKS_PER_XFER = 64
 assert MAX_BLOCKS_PER_XFER <= 255  # must fit the low byte of xfer_len_be
 
 
+class SenseReturn(enum.Enum, shape=unsigned(2)):
+    TEST_UNIT_READY = 0
+    READ_CAPACITY   = 1
+    XFER_RETRY      = 2
+    READY           = 3
+
+
 class USBMSCHost(wiring.Component):
     """
     USB Mass Storage Class Host - block device interface.
@@ -625,8 +657,15 @@ class USBMSCHost(wiring.Component):
         scsi_cmd = SCSIBulkHost.Command(scsi.cmd)
         cdb6 = CDB6(scsi_cmd.cdb.cdb6)
         cdb10 = CDB10(scsi_cmd.cdb.cdb10)
+        sense_cdb = CDBRequestSense(scsi_cmd.cdb.sense)
+        sense_return = Signal(SenseReturn)
 
         # Shared by the issue and -WAIT states of each command below.
+        request_sense_setup = [
+            sense_cdb.opcode.eq(SCSIOpCode.REQUEST_SENSE),
+            sense_cdb.alloc_len.eq(SENSE_DATA_BYTES),
+            scsi_cmd.data_len.eq(SENSE_DATA_BYTES),
+        ]
         read_capacity_setup = [
             cdb10.opcode.eq(SCSIOpCode.READ_CAPACITY_10),
             scsi_cmd.data_len.eq(READ_CAPACITY_SIZE_BYTES),
@@ -669,7 +708,8 @@ class USBMSCHost(wiring.Component):
                         with m.If(init_retry >= self._INIT_RETRY_MAX):
                             m.next = "WAIT-ENUMERATION"
                         with m.Else():
-                            m.next = "TEST-UNIT-READY"
+                            m.d.usb += sense_return.eq(SenseReturn.TEST_UNIT_READY)
+                            m.next = "REQUEST-SENSE"
 
             with m.State("READ-CAPACITY"):
                 m.d.comb += read_capacity_setup + [scsi_cmd.start.eq(1)]
@@ -688,7 +728,8 @@ class USBMSCHost(wiring.Component):
                         ]
                         m.next = "READY"
                     with m.Else():
-                        m.next = "READ-CAPACITY"
+                        m.d.usb += sense_return.eq(SenseReturn.READ_CAPACITY)
+                        m.next = "REQUEST-SENSE"
 
             with m.State("READY"):
                 m.d.comb += self.status.busy.eq(0)
@@ -721,8 +762,9 @@ class USBMSCHost(wiring.Component):
                         m.d.usb += [
                             read_retry.eq(read_retry + 1),
                             retry_timer.eq(self._RETRY_DELAY_CYCLES),
+                            sense_return.eq(SenseReturn.XFER_RETRY),
                         ]
-                        m.next = "XFER-RETRY-DELAY"
+                        m.next = "REQUEST-SENSE"
                     with m.Else():
                         # Success, or out of retry budget. Having burnt the
                         # whole budget on timeouts means nothing is answering
@@ -734,12 +776,34 @@ class USBMSCHost(wiring.Component):
                             self.resp.done.eq(1),
                             self.resp.error.eq(failed),
                         ]
-                        m.next = "READY"
+                        with m.If(scsi.status.error & ~scsi.status.aborted &
+                                  ~scsi.status.timeout):
+                            m.d.usb += sense_return.eq(SenseReturn.READY)
+                            m.next = "REQUEST-SENSE"
+                        with m.Else():
+                            m.next = "READY"
 
             with m.State("XFER-RETRY-DELAY"):
                 m.d.usb += retry_timer.eq(retry_timer - 1)
                 with m.If(retry_timer == 0):
                     m.next = "XFER"
+
+            with m.State("REQUEST-SENSE"):
+                m.d.comb += request_sense_setup + [scsi_cmd.start.eq(1)]
+                m.next = "REQUEST-SENSE-WAIT"
+
+            with m.State("REQUEST-SENSE-WAIT"):
+                m.d.comb += request_sense_setup
+                with m.If(scsi.status.done):
+                    with m.Switch(sense_return):
+                        with m.Case(SenseReturn.TEST_UNIT_READY):
+                            m.next = "TEST-UNIT-READY"
+                        with m.Case(SenseReturn.READ_CAPACITY):
+                            m.next = "READ-CAPACITY"
+                        with m.Case(SenseReturn.XFER_RETRY):
+                            m.next = "XFER-RETRY-DELAY"
+                        with m.Case(SenseReturn.READY):
+                            m.next = "READY"
 
         # The reset below tears down any in-flight transfer without the FSM
         # ever completing, so report one here. Normal completions just

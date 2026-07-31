@@ -246,6 +246,14 @@ class FakeUSBMSCDevice(Elaboratable):
         device_ready = Signal() # Set when TEST_UNIT_READY succeeds
         csw_fail = Signal()
 
+        sense_flat = SenseData.const({
+            "response_code":  0x70,  # current errors, fixed format
+            "sense_key":      0x02,  # NOT READY
+            "additional_len": SENSE_DATA_BYTES - 8,
+            "asc":            0x04,
+            "ascq":           0x01,
+        }).as_value()
+
         # ================================================================
         # CSW response (dynamic based on CBW tag)
         # ================================================================
@@ -332,6 +340,8 @@ class FakeUSBMSCDevice(Elaboratable):
                             with m.Else():
                                 m.d.usb += device_ready.eq(1)
                             m.next = "SEND-CSW"
+                        with m.Case(SCSIOpCode.REQUEST_SENSE):
+                            m.next = "SEND-SENSE"
                         with m.Case(SCSIOpCode.READ_CAPACITY_10):
                             with m.If(device_ready):
                                 m.next = "SEND-CAPACITY"
@@ -362,6 +372,18 @@ class FakeUSBMSCDevice(Elaboratable):
                 with m.If(stream_in.stream.ready):
                     m.d.usb += tx_byte_idx.eq(tx_byte_idx + 1)
                     with m.If(tx_byte_idx == READ_CAPACITY_SIZE_BYTES - 1):
+                        m.d.usb += tx_byte_idx.eq(0)
+                        m.next = "SEND-CSW"
+
+            with m.State("SEND-SENSE"):
+                m.d.comb += [
+                    stream_in.stream.valid.eq(1),
+                    stream_in.stream.payload.eq((sense_flat >> (tx_byte_idx[:5] * 8)) & 0xFF),
+                    stream_in.stream.last.eq(tx_byte_idx == SENSE_DATA_BYTES - 1),
+                ]
+                with m.If(stream_in.stream.ready):
+                    m.d.usb += tx_byte_idx.eq(tx_byte_idx + 1)
+                    with m.If(tx_byte_idx == SENSE_DATA_BYTES - 1):
                         m.d.usb += tx_byte_idx.eq(0)
                         m.next = "SEND-CSW"
 
