@@ -343,16 +343,10 @@ impl FatStream {
     }
 }
 
-/// Write-direction dual of [`FatStream`]: drains producer-filled chunks from
-/// the ring into the file's *pre-existing* cluster chain. Never allocates -
-/// open a file that is already large enough; completes at [`Self::is_full`],
-/// no looping.
+/// Write-direction dual of [`FatStream`]
 ///
-/// Producer contract: fill the ring at [`Self::bytes_produced`] (wrapping)
-/// and report progress through `tick`'s `produced_pos`; only whole chunks are
-/// submitted. Stay within half the ring of [`Self::bytes_submitted`] -
-/// submitted chunks may still be read live by the engine. `tick` fails the
-/// stream with [`StreamError::Overrun`] if breached (best-effort).
+/// Fill the ring, report progress through `tick`'s `produced_pos`;
+/// Stay within half the ring of [`Self::bytes_submitted`]
 pub struct FatStreamWriter {
     geo: StreamGeometry,
     map: ClusterMap,
