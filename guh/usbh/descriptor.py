@@ -150,15 +150,8 @@ class USBDescriptorParser(wiring.Component):
 
                     # At the end of each descriptor
                     with m.If(offset == (bLength-2)):
-                        m.d.usb += Print(desc_type, 'len =', bLength)
                         # Interface descriptor: update in_matching_interface flag
                         with m.If(desc_type == DescriptorType.INTERFACE):
-                            m.d.usb += Print('\t bInterfaceClass =', iface_class)
-                            if self._interface_subclass is not None:
-                                m.d.usb += Print('\t bInterfaceSubClass =', iface_subclass)
-                            if self._interface_protocol is not None:
-                                m.d.usb += Print('\t bInterfaceProtocol =', iface_protocol)
-
                             # Check class match (and subclass/protocol if specified)
                             interface_match = (iface_class == self._interface_class)
                             if self._interface_subclass is not None:
@@ -176,9 +169,6 @@ class USBDescriptorParser(wiring.Component):
                         capturing_out = Signal()
 
                         with m.Elif((desc_type == DescriptorType.ENDPOINT)):
-                            m.d.usb += Print('\t bEndpointAddress = ', endp_addr)
-                            m.d.usb += Print('\t bmAttributes = ', endp_attr)
-                            m.d.usb += Print('\t wMaxPacketSize = ', endp_mps.size)
                             with m.If(in_matching_interface):
                                 type_match = endp_attr.transfer_type == self._transfer_type
                                 is_in = endp_addr.direction == EndpointDirection.IN
@@ -191,7 +181,6 @@ class USBDescriptorParser(wiring.Component):
                                             self.o.i_endp.eq(endp_addr),
                                             self.o.i_endp_mps.eq(endp_mps),
                                             found_in.eq(1),
-                                            Print('\t **** EXTRACTED IN ****')
                                         ]
 
                                 # Capture OUT endpoint if wanted and not yet found
@@ -202,7 +191,6 @@ class USBDescriptorParser(wiring.Component):
                                             self.o.o_endp.eq(endp_addr),
                                             self.o.o_endp_mps.eq(endp_mps),
                                             found_out.eq(1),
-                                            Print('\t **** EXTRACTED OUT ****')
                                         ]
 
                         # Check if we have all required endpoints

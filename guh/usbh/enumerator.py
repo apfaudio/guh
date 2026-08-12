@@ -61,16 +61,18 @@ class USBHostEnumerator(wiring.Component):
     ctrl: Out(USBSIEInterface())
 
     def __init__(self, *, bus=None, handle_clocking=True,
-                 device_address=0x12, config_number=1, parser, fifo_depth=64):
+                 device_address=0x12, config_number=1, parser,
+                 tx_fifo_depth=64, rx_fifo_depth=64):
         self._device_address = device_address
         self._config_number = config_number
 
         # Descriptor parser (streamed config descriptor stream at correct stage internally)
         self.parser = parser
 
-        # Engines sending large bulk OUT packets must size fifo_depth to hold
-        # a whole packet (up to 512 bytes at HS).
-        self.sie = USBSIE(bus=bus, handle_clocking=handle_clocking, fifo_depth=fifo_depth)
+        # Engines sending large bulk OUT packets must size tx_fifo_depth to
+        # hold a whole packet (up to 512 bytes at HS).
+        self.sie = USBSIE(bus=bus, handle_clocking=handle_clocking,
+                          tx_fifo_depth=tx_fifo_depth, rx_fifo_depth=rx_fifo_depth)
 
         super().__init__()
 
@@ -97,13 +99,14 @@ class USBHostEnumerator(wiring.Component):
                 SetupPayload.set_configuration(self._config_number)
             )
         )
-        setup_mem = setup_packets.read_port(domain='comb')
+        setup_mem = setup_packets.read_port(domain='usb')
 
         # Bits of state discovered by state machine
         current_dev_addr = Signal(7, init=0)
         enum_retry       = Signal(range(4))
         reset_triggered  = Signal(1, init=0)
         setup_byte_ix    = Signal(range(8))
+        setup_byte_rdy   = Signal()
         max_packet_size  = Signal(unsigned(8), init=64)
         last_packet_byte = Signal(unsigned(8), init=0)
         enumerated       = Signal(1, init=0)
@@ -146,16 +149,22 @@ class USBHostEnumerator(wiring.Component):
         def make_load_setup_state(state_name, next_state, setup_offset):
             """Generate state that loads 8 bytes from setup ROM to Tx FIFO."""
             with m.State(state_name):
-                m.d.comb += [
-                    setup_mem.addr.eq(setup_offset + setup_byte_ix),
-                    sie.ctrl.txs.payload.eq(setup_mem.data),
-                    sie.ctrl.txs.valid.eq(1),
-                ]
-                with m.If(sie.ctrl.txs.ready):
-                    m.d.usb += setup_byte_ix.eq(setup_byte_ix + 1)
-                    with m.If(setup_byte_ix == 7):
-                        m.d.usb += setup_byte_ix.eq(0)
-                        m.next = next_state
+                m.d.comb += setup_mem.addr.eq(setup_offset + setup_byte_ix)
+                with m.If(setup_byte_rdy):
+                    m.d.comb += [
+                        sie.ctrl.txs.payload.eq(setup_mem.data),
+                        sie.ctrl.txs.valid.eq(1),
+                    ]
+                    with m.If(sie.ctrl.txs.ready):
+                        m.d.usb += [
+                            setup_byte_rdy.eq(0),
+                            setup_byte_ix.eq(setup_byte_ix + 1),
+                        ]
+                        with m.If(setup_byte_ix == 7):
+                            m.d.usb += setup_byte_ix.eq(0)
+                            m.next = next_state
+                with m.Else():
+                    m.d.usb += setup_byte_rdy.eq(1)
 
         def make_setup_xfer_state(state_name, next_state, dev_addr):
             """Generate state that sends SETUP token."""

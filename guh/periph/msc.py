@@ -147,10 +147,10 @@ class Peripheral(wiring.Component):
     # bursts (the DMAEngine only issues whole bursts).
     _DMA_BURST_LEN    = 8
 
-    # 8KiB = size of FIFO between USB and PSRAM DMA engines.
+    # 512B = size of FIFO between USB and PSRAM DMA engines.
     # Empirically determined to be just enough to not cause backpressure on an SoC
     # design which is hammering PSRAM at the same time as this core.
-    _DATA_FIFO_WORDS  = 8192 // 4
+    _DATA_FIFO_WORDS  = 512 // 4
 
     def __init__(self, *, fifo_depth=8, addr_width=22, device_address=0x12,
                  msc_host=None):

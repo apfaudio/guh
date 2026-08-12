@@ -181,7 +181,7 @@ class SCSIBulkHost(wiring.Component):
             **kwargs,
             config_number=1,
             # The SIE tx FIFO must hold a whole preloaded bulk OUT packet.
-            fifo_depth=self.MAX_BULK_PACKET_BYTES,
+            tx_fifo_depth=self.MAX_BULK_PACKET_BYTES,
             parser=USBDescriptorParser(
                 endpoint_filter=EndpointFilter.IN_AND_OUT,
                 transfer_type=EndpointTransferType.BULK,
@@ -206,11 +206,11 @@ class SCSIBulkHost(wiring.Component):
             width=packet_layout.size, depth=RX_FIFO_DEPTH))
         wiring.connect(m, rx_fifo.r_stream, wiring.flipped(self.rx_data))
 
-        cbw_tag = Signal(32, init=1)
+        cbw_tag = Signal(8, init=1)
         tx_byte_idx = Signal(range(CBW_SIZE_BYTES))
         rx_byte_idx = Signal(10)
         rx_data_count = Signal(16)
-        data_len = Signal(32)
+        data_len = Signal(18)
 
         csw_sig = Signal(CSW)
         csw_flat = csw_sig.as_value()
@@ -234,7 +234,7 @@ class SCSIBulkHost(wiring.Component):
         # mirrored into a replay buffer, since the SIE drains its tx FIFO
         # after every transaction, successful or not.
         mps_out = enum.parser.o.o_endp_mps.size
-        tx_sent = Signal(32)
+        tx_sent = Signal(18)
         pkt_len = Signal(range(self.MAX_BULK_PACKET_BYTES + 1))
         out_idx = Signal(range(self.MAX_BULK_PACKET_BYTES + 1))
         m.submodules.replay_mem = replay_mem = memory.Memory(
@@ -262,7 +262,7 @@ class SCSIBulkHost(wiring.Component):
 
         cbw_flat = cbw_sig.as_value()
         cbw_byte_out = Signal(8)
-        m.d.comb += cbw_byte_out.eq((cbw_flat >> (tx_byte_idx * 8)) & 0xFF)
+        m.d.comb += cbw_byte_out.eq(cbw_flat.word_select(tx_byte_idx, 8))
 
         def start_bulk_out(endp):
             return [

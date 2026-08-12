@@ -339,8 +339,10 @@ class USBSIE(wiring.Component):
     _XFER_IPD_HS = 24    # Inter-packet delay for High-Speed: 192 HS bit times,
                          # the spec max turnaround (USB 2.0 7.1.19.2).
 
-    def __init__(self, *, bus=None, handle_clocking=True, fullspeed_only=False, fifo_depth=64):
-        self.fifo_depth = fifo_depth
+    def __init__(self, *, bus=None, handle_clocking=True, fullspeed_only=False,
+                 tx_fifo_depth=64, rx_fifo_depth=64):
+        self.tx_fifo_depth = tx_fifo_depth
+        self.rx_fifo_depth = rx_fifo_depth
 
         # UTMI interface (TODO: move to component signature once Records removed from LUNA)
         # TODO: support also non-ULPI interfaces? should be pretty easy...
@@ -389,8 +391,8 @@ class USBSIE(wiring.Component):
         tx_multiplexer.add_input(handshake_generator.tx)
 
         # Tx/Rx FIFOs
-        m.submodules.tx_fifo = tx_fifo = DomainRenamer("usb")(fifo.SyncFIFO(width=8, depth=self.fifo_depth))
-        m.submodules.rx_fifo = rx_fifo = DomainRenamer("usb")(fifo.SyncFIFO(width=8, depth=self.fifo_depth))
+        m.submodules.tx_fifo = tx_fifo = DomainRenamer("usb")(fifo.SyncFIFOBuffered(width=8, depth=self.tx_fifo_depth))
+        m.submodules.rx_fifo = rx_fifo = DomainRenamer("usb")(fifo.SyncFIFOBuffered(width=8, depth=self.rx_fifo_depth))
 
         # ============================================================
         # RESET CONTROLLER - Bus Reset and Speed Detection
@@ -473,7 +475,7 @@ class USBSIE(wiring.Component):
         rx_len = Signal(8)
         response = Signal(TransferResponse)
         # Captured from TX FIFO level at transfer start
-        tx_len = Signal(range(self.fifo_depth + 1))
+        tx_len = Signal(range(self.tx_fifo_depth + 1))
         tx_byte_count = Signal(16)
 
         # SIE token stream for multiplexing with SOF. SOF has priority when SIE is idle
