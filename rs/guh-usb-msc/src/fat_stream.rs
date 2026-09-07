@@ -283,12 +283,21 @@ impl FatStream {
         Ok(())
     }
 
+    pub fn rewind(&mut self) {
+        self.logical_write = 0;
+        self.logical_read = 0;
+    }
+
     pub fn bytes_submitted(&self) -> u64 {
         self.logical_write
     }
 
     pub fn bytes_total(&self) -> u64 {
         self.geo.total_bytes()
+    }
+
+    pub fn bytes_consumed(&self) -> u64 {
+        self.logical_read
     }
 
     pub fn underruns(&self) -> u32 {
